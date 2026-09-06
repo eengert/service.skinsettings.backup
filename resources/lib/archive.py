@@ -42,6 +42,7 @@ _APPEARANCE_INTEGER_FIELDS = {"lookandfeel.skinzoom"}
 JOURNAL_NAME = "transaction.json"
 _ROLLBACK_FILES = "files"
 _SKIN_USER_SLUG = re.compile(r"^user-[0-9A-Za-z]+$")
+_EMPTY_SKIN_SETTINGS = b'<?xml version="1.0" encoding="UTF-8"?><settings />'
 
 
 class BackupError(Exception):
@@ -292,8 +293,8 @@ def _validate_settings(data: bytes) -> None:
         root = ElementTree.fromstring(data)
     except (ElementTree.ParseError, ValueError) as exc:
         raise BackupError("settings.xml is not valid XML") from exc
-    if root.tag != "settings" or not root.findall("setting"):
-        raise BackupError("settings.xml must contain a Kodi <settings> document with a <setting>")
+    if root.tag != "settings" or any(child.tag != "setting" for child in root):
+        raise BackupError("settings.xml must contain a Kodi <settings> document")
 
 
 def _reject_json_constant(value: str) -> None:
@@ -348,11 +349,14 @@ def collect_files(profile_path: os.PathLike | str, skin_id: str) -> Dict[str, by
     skin_user_slugs = _current_skin_user_slugs(root, skin_id)
     first_paths = _enumerate_managed(root, skin_id, skin_user_slugs)
     settings = _settings_path(skin_id)
-    if settings not in first_paths:
-        raise BackupError("skin settings.xml does not exist")
     files = _read_snapshot(root, first_paths)
     if skin_user_slugs != _current_skin_user_slugs(root, skin_id) or first_paths != _enumerate_managed(root, skin_id, skin_user_slugs):
         raise BackupError("managed files changed while being collected")
+    # Kodi treats a missing skin settings file as an empty/default settings set.
+    # Preserve that state explicitly so helper data can still be backed up and a
+    # restore can reliably return the skin to the same defaults.
+    if settings not in files:
+        files[settings] = _EMPTY_SKIN_SETTINGS
     return _validate_files(files, skin_id)
 
 

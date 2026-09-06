@@ -4,7 +4,7 @@ A small Kodi program and background service for versioned skin-setting backups. 
 
 ## Install and use
 
-1. In Kodi, enable installation from unknown sources if needed, then **Add-ons → Install from zip file**, selecting `service.skinsettings.backup-1.0.2.zip`.
+1. In Kodi, enable installation from unknown sources if needed, then **Add-ons → Install from zip file**, selecting `service.skinsettings.backup-1.0.3.zip`.
 2. Open **Program add-ons → Skin Settings Backup → Settings → Backup destination**. Select a writable folder in Kodi’s folder picker, preferably on a Mac or NAS. Network sources added in Kodi’s File Manager are available in the picker. The add-on menu’s **Choose destination** action also opens a folder picker. Configure share authentication through Kodi's network sources instead of embedding passwords in the path.
 3. Select **Back up now** to create and verify your initial protected snapshot. Select **Save protected snapshot** before a skin update or after a major customization.
 4. In Settings, select an interval (1, 6, 12, 24 or 168 hours) and how many automatic backups to keep (default 14). Scheduling is enabled once a destination is set. The first snapshot and explicitly protected snapshots never expire.
@@ -30,6 +30,8 @@ If settings controls appear without labels after a manually copied development i
 | Kodi font/theme/color/skin-zoom selections | Yes, when exposed by Kodi |
 | Kodi view database and other global settings | Not included |
 | Custom image/font files, playlists, media sources, libraries, other add-on accounts | Not included |
+
+Kodi does not create a skin `settings.xml` until the skin has persisted a setting. If it is absent, the add-on records an empty/default settings document and still backs up the skin's helper data, including AF3 menus and widgets.
 
 AF3 is the first skin with a dedicated rebuild adapter. Generic support restores the main settings XML; a different skin's separately stored helper configuration may need another adapter. Linked artwork, playlists and widget-provider add-ons must still be available at their original paths. A backup is not a full portable Kodi installation.
 

@@ -56,3 +56,9 @@ Added an original AI-generated 512-pixel thumbnail, declared it in metadata, and
 Changed Backup destination from a text editor to Kodi's native writable path picker, including File Manager sources. The setting ID is unchanged and path values remain strings, preserving existing destinations. Updated help and installation instructions.
 
 All 36 automated tests pass. Installed 1.0.2 in idle local Kodi and visually verified that selecting Backup destination opens the native folder picker; cancelled without changing the destination. Repository index, checksums and packaged content were checked, with other add-ons unchanged.
+
+## Version 1.0.3 — skins without a persisted settings file
+
+Kodi permits an active skin to have no user `settings.xml`; this represents an empty/default setting set. Backup previously treated that valid state as an error and skipped AF3 helper data. It now records a validated empty settings document while continuing to collect Skin Variables menus, widgets, views and profiles. This also gives restore an explicit representation of the default state, while reset detection still notices a later drop from a populated settings file.
+
+All 37 automated tests pass. Kodi 21.1's embedded Python passed all eight native checks, including collection from a temporary skin profile with no `settings.xml`; the live AF3 read-only snapshot also passed.

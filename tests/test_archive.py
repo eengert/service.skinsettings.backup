@@ -70,6 +70,20 @@ class ArchiveTests(unittest.TestCase):
         self.assertNotIn("addon_data/unrelated.addon/settings.xml", unpacked)
         self.assertEqual(sorted(unpacked), [entry["path"] for entry in manifest["entries"]])
 
+    def test_collects_helper_data_when_kodi_has_no_skin_settings_file(self):
+        helper = f"addon_data/script.skinvariables/nodes/{SKIN_ID}/movies/main.json"
+        self.write(helper, b'{"label":"Movies"}')
+
+        files = archive.collect_files(self.profile, SKIN_ID)
+        settings = f"addon_data/{SKIN_ID}/settings.xml"
+
+        self.assertEqual(b'{"label":"Movies"}', files[helper])
+        self.assertEqual("settings", archive.ElementTree.fromstring(files[settings]).tag)
+        self.assertEqual([], archive.ElementTree.fromstring(files[settings]).findall("setting"))
+        manifest, unpacked = archive.read_archive(archive.build_archive(files, self.metadata()))
+        self.assertEqual(files, unpacked)
+        self.assertEqual(2, len(manifest["entries"]))
+
     def test_appearance_metadata_is_preserved_and_defaults_empty(self):
         files = {f"addon_data/{SKIN_ID}/settings.xml": SETTINGS}
         metadata = self.metadata()

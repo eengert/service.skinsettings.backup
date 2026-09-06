@@ -71,6 +71,13 @@ def run(app):
                 check(collect_files(profile, skin) == files, 'Restore content mismatch')
                 check(os.path.isfile(os.path.join(rollback, 'transaction.json')), 'Missing restore journal')
                 result['tests'].append('Transactional restore in temporary profile')
+                os.unlink(path)
+                default_files = collect_files(profile, skin)
+                default_settings = default_files['addon_data/{}/settings.xml'.format(skin)]
+                check(ET.fromstring(default_settings).tag == 'settings' and
+                      not ET.fromstring(default_settings).findall('setting'),
+                      'Missing settings.xml was not represented as skin defaults')
+                result['tests'].append('Skin defaults without a persisted settings.xml')
                 actual_start = time.monotonic()
                 actual = collect_files(app.profile, xbmc.getSkinDir())
                 actual_meta = dict(meta, skin_id=xbmc.getSkinDir())
