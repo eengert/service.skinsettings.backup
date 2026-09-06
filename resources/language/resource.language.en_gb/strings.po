@@ -1,0 +1,66 @@
+msgid ""
+msgstr ""
+"Language: en_GB\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgctxt "#32000"
+msgid "Skin Settings Backup"
+msgstr ""
+
+msgctxt "#32001"
+msgid "Backup destination"
+msgstr ""
+
+msgctxt "#32002"
+msgid "Device label (optional)"
+msgstr ""
+
+msgctxt "#32003"
+msgid "Enable scheduled backups"
+msgstr ""
+
+msgctxt "#32004"
+msgid "Check for changes every"
+msgstr ""
+
+msgctxt "#32005"
+msgid "Automatic backups to keep per skin"
+msgstr ""
+
+msgctxt "#32006"
+msgid "Notify after scheduled backups"
+msgstr ""
+
+msgctxt "#32011"
+msgid "Use Choose destination in the add-on menu, or enter a writable local or network folder, such as smb://server/share/KodiBackups. Store passwords in Kodi's network source settings."
+msgstr ""
+
+msgctxt "#32012"
+msgid "Runs while Kodi is awake and idle. Missed checks run after Kodi starts again. A destination must be configured first."
+msgstr ""
+
+msgctxt "#32013"
+msgid "Only changed configurations create new automatic backups. The first snapshot and manual protected snapshots never expire."
+msgstr ""
+
+msgctxt "#32020"
+msgid "Hour"
+msgstr ""
+
+msgctxt "#32021"
+msgid "6 hours"
+msgstr ""
+
+msgctxt "#32022"
+msgid "12 hours"
+msgstr ""
+
+msgctxt "#32023"
+msgid "Day"
+msgstr ""
+
+msgctxt "#32024"
+msgid "Week"
+msgstr ""

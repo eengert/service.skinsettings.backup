@@ -1,0 +1,21 @@
+{
+  "actual_skin": {
+    "archive_bytes": 8263,
+    "files": 8,
+    "seconds": 0.0224,
+    "skin": "skin.arctic.fuse.3",
+    "source_bytes": 28048
+  },
+  "elapsed_seconds": 4.1137,
+  "kodi": "21.1 (21.1.0) Git:20240817-183eb85f10",
+  "python": "3.11.7",
+  "success": true,
+  "tests": [
+    "Kodi settings schema and defaults",
+    "Archive round trip",
+    "Kodi VFS publish and read-back verification",
+    "Transactional restore in temporary profile",
+    "Read-only backup of current skin",
+    "Native backup orchestration and unchanged-backup skipping"
+  ]
+}
