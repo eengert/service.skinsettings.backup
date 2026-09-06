@@ -86,6 +86,37 @@ def skin_setting_values(files, skin):
     return values
 
 
+def live_skin_setting_values(skin):
+    """Read the active skin's authoritative in-memory settings through Kodi."""
+    validate_skin_id(skin)
+    result = rpc('Settings.GetSkinSettings')
+    if not isinstance(result, dict) or result.get('skin') != skin or not isinstance(result.get('settings'), list):
+        raise BackupError('Kodi did not expose the active skin settings.')
+    values, seen = [], set()
+    for item in result['settings']:
+        if not isinstance(item, dict):
+            raise BackupError('Kodi returned an invalid skin setting.')
+        setting_id, kind, value = item.get('id'), item.get('type'), item.get('value')
+        if (not isinstance(setting_id, str) or not SKIN_SETTING_ID.fullmatch(setting_id) or
+                setting_id in seen or kind not in ('boolean', 'string') or
+                (kind == 'boolean' and not isinstance(value, bool)) or
+                (kind == 'string' and not isinstance(value, str))):
+            raise BackupError('Kodi returned an invalid skin setting.')
+        seen.add(setting_id)
+        values.append({'id': setting_id, 'type': kind, 'value': value})
+    return sorted(values, key=lambda item: item['id'].lower())
+
+
+def skin_settings_document(values):
+    """Encode a live setting snapshot in Kodi's portable skin settings format."""
+    root = ET.Element('settings')
+    for item in values:
+        kind = 'bool' if item['type'] == 'boolean' else 'string'
+        node = ET.SubElement(root, 'setting', {'id': item['id'], 'type': kind})
+        node.text = ('true' if item['value'] else 'false') if kind == 'bool' else item['value']
+    return ET.tostring(root, encoding='utf-8', xml_declaration=True)
+
+
 @contextlib.contextmanager
 def operation_lock(path):
     """OS releases the lock after a crash; never guess an operation's expiry time."""
@@ -255,15 +286,25 @@ class App:
         self.pause(2)
         if skin != xbmc.getSkinDir():
             raise BackupError('The active skin changed while restored settings were being verified.')
+        self.verify_live_skin_settings(skin, checked)
+
+    def verify_live_skin_settings(self, skin, values):
         live = rpc('Settings.GetSkinSettings')
         if not isinstance(live, dict) or live.get('skin') != skin or not isinstance(live.get('settings'), list):
-            raise BackupError('Kodi did not expose the reloaded skin settings.')
+            raise BackupError('Kodi did not expose the restored skin settings.')
         current = {item.get('id'): (item.get('type'), item.get('value'))
                    for item in live.get('settings', []) if isinstance(item, dict)}
-        mismatched = [item['id'] for item in checked
+        mismatched = [item['id'] for item in values
                       if current.get(item['id']) != (item['type'], item['value'])]
         if mismatched:
-            raise BackupError('Kodi did not apply {} restored skin setting(s).'.format(len(mismatched)))
+            raise BackupError('Kodi did not keep {} restored skin setting(s).'.format(len(mismatched)))
+
+    def capture_files(self, skin):
+        """Combine helper files with Kodi's live setting map, never a stale disk copy."""
+        files = collect_files(self.profile, skin)
+        values = live_skin_setting_values(skin)
+        files['addon_data/{}/settings.xml'.format(skin)] = skin_settings_document(values)
+        return files
 
     def backup(self, manual=False, protected=False):
         with operation_lock(self.lock_path):
@@ -278,10 +319,10 @@ class App:
             if previous.get('blocked') and not manual:
                 raise BackupError(previous['blocked'])
             # Kodi delays saves. Read twice across a quiet period before trusting this snapshot.
-            first = collect_files(self.profile, skin)
+            first = self.capture_files(skin)
             appearance = self.appearance()
             self.pause(2)
-            files = collect_files(self.profile, skin)
+            files = self.capture_files(skin)
             if (skin != xbmc.getSkinDir() or fingerprint(first) != fingerprint(files)
                     or appearance != self.appearance()):
                 raise BackupError('Skin settings are still changing. Try again after the skin is idle.')
@@ -328,8 +369,8 @@ class App:
             atomic_json(self.state_path, state)
             # Retention runs only after the new archive and completion record verified successfully.
             store.prune(max(1, self.addon.getSettingInt('keep')))
-            message = 'Saved {} files ({:.1f} KB){}.'.format(
-                len(files), len(blob) / 1024,
+            message = 'Saved {} skin settings and {} files ({:.1f} KB){}.'.format(
+                stats['settings'], len(files), len(blob) / 1024,
                 ' as a protected snapshot' if protected else '')
             if not persisted:
                 message += ' Kodi did not create settings.xml; defaults and helper data were still backed up.'
@@ -350,12 +391,18 @@ class App:
     def restore_blob(self, blob):
         manifest, files = read_archive(blob)
         skin = manifest['skin_id']
+        restored_settings = skin_setting_values(files, skin)
+        helper_files = {path: hashlib.sha256(data).hexdigest() for path, data in files.items()
+                        if path != 'addon_data/{}/settings.xml'.format(skin)}
         try:
             installed = xbmcaddon.Addon(skin)
         except RuntimeError as exc:
             raise BackupError('Install the backed-up skin and its dependencies before restoring.') from exc
-        label = '{}\n{}\nDevice: {}\n{} files'.format(skin, manifest['created_at'],
-                manifest.get('device_name', 'Unknown'), len(files))
+        label = '{}\n{}\nDevice: {}\n{} skin settings; {} helper files'.format(
+                skin, manifest['created_at'], manifest.get('device_name', 'Unknown'),
+                len(restored_settings), len(helper_files))
+        if not restored_settings:
+            label += '\nWARNING: This backup contains no saved skin settings.'
         if installed.getAddonInfo('version') != manifest.get('skin_version'):
             label += '\nSkin version differs; older settings may behave differently.'
         label += '\nReplace this skin’s saved settings? A local rollback copy will be kept.'
@@ -384,7 +431,7 @@ class App:
                        'paths': list(files), 'started_at': time.time(),
                        'known_transactions': sorted(os.listdir(self.rollback_root)) if os.path.isdir(self.rollback_root) else [],
                        'appearance': manifest.get('appearance', {}),
-                       'skin_settings': skin_setting_values(files, skin)}
+                       'skin_settings': restored_settings, 'helper_hashes': helper_files}
             atomic_json(self.pending_path, pending)
             try:
                 rollback = restore_files(self.profile, skin, files, self.rollback_root)
@@ -436,11 +483,39 @@ class App:
                     raise BackupError('Kodi could not apply the restored appearance. Choose a supported theme/font and retry Finish restored skin.')
             if skin == AF3:
                 self.rebuild_af3(pending)
+                self.pause(2)
+            if 'skin_settings' in pending:
+                self.verify_live_skin_settings(skin, pending['skin_settings'])
+            self.verify_restored_helpers(pending)
             state = self.state()
             state['skins'] = {}
             atomic_json(self.state_path, state)
             os.unlink(self.pending_path)
-            xbmcgui.Dialog().notification(TITLE, 'Restore complete.', xbmcgui.NOTIFICATION_INFO)
+            xbmcgui.Dialog().notification(
+                TITLE, 'Restore complete: {} skin settings; {} helper files.'.format(
+                    len(pending.get('skin_settings', [])), len(pending.get('helper_hashes', {}))),
+                xbmcgui.NOTIFICATION_INFO)
+
+    def verify_restored_helpers(self, pending):
+        """Do not report success if AF3 or its helper replaced restored source data."""
+        expected = pending.get('helper_hashes', {})
+        if not isinstance(expected, dict):
+            raise BackupError('The pending restore contains invalid helper verification data.')
+        mismatched = []
+        for relative, digest in expected.items():
+            if (not isinstance(relative, str) or not isinstance(digest, str) or
+                    not re.fullmatch(r'[0-9a-f]{64}', digest)):
+                raise BackupError('The pending restore contains invalid helper verification data.')
+            path = os.path.join(self.profile, *relative.split('/'))
+            try:
+                with open(path, 'rb') as handle:
+                    actual = hashlib.sha256(handle.read()).hexdigest()
+            except OSError:
+                actual = None
+            if actual != digest:
+                mismatched.append(relative)
+        if mismatched:
+            raise BackupError('{} restored helper file(s) did not remain applied.'.format(len(mismatched)))
 
     def rebuild_af3(self, pending):
         if not xbmc.getCondVisibility('System.AddonIsEnabled(script.skinvariables)'):

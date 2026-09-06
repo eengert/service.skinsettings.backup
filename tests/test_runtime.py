@@ -171,6 +171,30 @@ def _settings(count, marker):
     return ('<?xml version="1.0"?><settings>{}</settings>'.format(values)).encode()
 
 
+def _execute_json_rpc(request):
+    payload = json.loads(request)
+    method = payload["method"]
+    if method == "Settings.GetSkinSettings":
+        path = ENV.addon_data / ENV.skin / "settings.xml"
+        settings = []
+        if path.exists():
+            import xml.etree.ElementTree as ET
+            for item in ET.parse(path).getroot().findall("setting"):
+                kind = item.get("type") or "string"
+                settings.append({
+                    "id": item.get("id"),
+                    "type": "boolean" if kind == "bool" else "string",
+                    "value": (item.text or "").lower() == "true" if kind == "bool" else (item.text or ""),
+                })
+        result = {"skin": ENV.skin, "settings": settings}
+    else:
+        result = True
+    return json.dumps({"jsonrpc": "2.0", "id": 1, "result": result})
+
+
+xbmc.executeJSONRPC = _execute_json_rpc
+
+
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -254,6 +278,19 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertIn("Kodi did not create settings.xml", result)
         self.assertEqual(0, self.state_entry()["stats"]["settings"])
+
+    def test_backup_uses_live_settings_instead_of_stale_disk_document(self):
+        live = [
+            {"id": "family.category", "type": "string", "value": "Movies"},
+            {"id": "family.enabled", "type": "boolean", "value": True},
+        ]
+        with mock.patch.object(runtime, "live_skin_setting_values", return_value=live):
+            result = self.app.backup()
+
+        _manifest, files = runtime.read_archive(self.app.store(SKIN_ID, self.app.state()).load(self.records()[0]))
+        values = runtime.skin_setting_values(files, SKIN_ID)
+        self.assertEqual(live, values)
+        self.assertIn("Saved 2 skin settings", result)
 
     def test_background_guard_does_not_rewrite_an_existing_valid_file(self):
         with mock.patch.object(runtime.xbmc, "executebuiltin") as execute:
@@ -539,6 +576,7 @@ class RuntimeTests(unittest.TestCase):
                 "created_at": "2026-09-06T12:00:00Z",
                 "paths": [],
                 "skin_settings": values,
+                "helper_hashes": {},
             },
         )
         order = []
@@ -548,7 +586,9 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(self.app, "clear_helper_cache",
                                   side_effect=lambda skin, paths: order.append(("clear", skin, paths))), \
                 mock.patch.object(self.app, "rebuild_af3",
-                                  side_effect=lambda pending: order.append(("rebuild", pending["skin_id"]))):
+                                  side_effect=lambda pending: order.append(("rebuild", pending["skin_id"]))), \
+                mock.patch.object(self.app, "verify_live_skin_settings",
+                                  side_effect=lambda skin, settings: order.append(("verify", skin, settings))):
             self.app.finish_restore()
 
         self.assertEqual(
@@ -556,10 +596,38 @@ class RuntimeTests(unittest.TestCase):
                 ("apply", runtime.AF3, values),
                 ("clear", runtime.AF3, []),
                 ("rebuild", runtime.AF3),
+                ("verify", runtime.AF3, values),
             ],
             order,
         )
-        self.assertFalse(Path(self.app.pending_path).exists())
+
+    def test_finish_restore_rejects_helper_file_changed_during_rebuild(self):
+        ENV.skin = runtime.AF3
+        helper = "addon_data/script.skinvariables/nodes/{}/menu.json".format(runtime.AF3)
+        helper_path = ENV.profile / helper
+        helper_path.parent.mkdir(parents=True, exist_ok=True)
+        helper_path.write_bytes(b'{"source":true}')
+        runtime.atomic_json(
+            self.app.pending_path,
+            {
+                "skin_id": runtime.AF3,
+                "phase": "rebuild",
+                "created_at": "2026-09-06T12:00:00Z",
+                "paths": [helper],
+                "skin_settings": [],
+                "helper_hashes": {helper: __import__("hashlib").sha256(b'{"source":true}').hexdigest()},
+            },
+        )
+
+        def overwrite(_pending):
+            helper_path.write_bytes(b'{"target":true}')
+
+        with mock.patch.object(self.app, "apply_skin_settings"), \
+                mock.patch.object(self.app, "rebuild_af3", side_effect=overwrite):
+            with self.assertRaisesRegex(runtime.BackupError, "did not remain applied"):
+                self.app.finish_restore()
+
+        self.assertTrue(Path(self.app.pending_path).exists())
 
     def test_finish_restore_applies_only_allowed_appearance_in_defined_order(self):
         appearance = {

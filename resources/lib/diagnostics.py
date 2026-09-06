@@ -105,7 +105,17 @@ def run(app):
             fixture.lock_path = os.path.join(root, 'operation.lock')
             fixture.rollback_root = os.path.join(root, 'rollback')
             fixture.pending_path = os.path.join(root, 'pending-restore.json')
-            check(fixture.backup().startswith('Saved'), 'Native backup did not publish')
+            message = fixture.backup()
+            check(message.startswith('Saved'), 'Native backup did not publish')
+            records = fixture.store(xbmc.getSkinDir(), fixture.state()).records()
+            check(len(records) == 1, 'Native backup record is missing')
+            _manifest, native_files = read_archive(fixture.store(
+                xbmc.getSkinDir(), fixture.state()).load(records[0]))
+            native_settings = ET.fromstring(native_files[
+                'addon_data/{}/settings.xml'.format(xbmc.getSkinDir())]).findall('setting')
+            check(native_settings, 'Native backup did not capture Kodi live skin settings')
+            result['actual_skin']['live_settings'] = len(native_settings)
+            result['tests'].append('Kodi live skin settings captured into the archive')
             persisted = ET.parse(app.skin_settings_path(xbmc.getSkinDir())).getroot()
             check(any(item.get('id') == PERSISTENCE_MARKER for item in persisted.findall('setting')),
                   'Kodi did not write the skin settings persistence marker')

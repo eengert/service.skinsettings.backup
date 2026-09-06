@@ -31,15 +31,15 @@ If settings controls appear without labels after a manually copied development i
 | Kodi view database and other global settings | Not included |
 | Custom image/font files, playlists, media sources, libraries, other add-on accounts | Not included |
 
-Kodi does not create a skin `settings.xml` until the skin has persisted a setting. If it is absent, the add-on records an empty/default settings document and still backs up the skin's helper data, including AF3 menus and widgets.
+Kodi does not always keep the on-disk skin `settings.xml` synchronized with its live settings, especially on tvOS. Backups therefore capture the active skin's authoritative live bool/string setting map through Kodi's JSON-RPC API and encode it as a portable `settings.xml`. The file on disk remains a persistence safeguard rather than the backup source. Skin Variables profile folders are discovered from both its user declaration and its existing profile node directories.
 
-The service checks for a valid active-skin `settings.xml` every five minutes while Kodi is idle and asks Kodi's native skin-setting saver to create it when missing. Every backup also forces a native save and waits for Kodi's deferred write before reading the file. The add-on never writes live skin settings directly. If Kodi cannot persist the file, backup still captures an explicit default document and the available helper data, and a manual backup reports the condition.
+The service checks for a valid active-skin `settings.xml` every five minutes while Kodi is idle and asks Kodi's native skin-setting saver to create it when missing. Every backup also forces a native save, but the archive is built from Kodi's live setting map so a missing or stale file cannot silently produce an empty backup. A manual backup reports exactly how many skin settings and helper files were saved.
 
 AF3 is the first skin with a dedicated rebuild adapter. Generic support restores the main settings XML; a different skin's separately stored helper configuration may need another adapter. Linked artwork, playlists and widget-provider add-ons must still be available at their original paths. A backup is not a full portable Kodi installation.
 
 ## Restore
 
-Open **Restore backup** to choose a restore point from this device/profile, or **Import backup ZIP** to select an archive from another device. Import reads the skin ID from the verified archive. Install that skin and its dependencies first. The confirmation shows the skin, device, date and version mismatch, if any.
+Open **Restore backup** to choose a restore point from this device/profile, or **Import backup ZIP** to select an archive from another device. Import reads the skin ID from the verified archive. Install that skin and its dependencies first. The confirmation shows the skin, device, date, saved skin-setting count, helper-file count and version mismatch, if any. It warns when an older archive contains zero skin settings.
 
 When restoring the active skin, the add-on switches to Estuary (or Estouchy when restoring Estuary). **Accept Kodi's “Keep this skin” prompt.** The add-on waits for the confirmation timeout to pass before replacing files. If neither fallback is installed, manually switch to another skin and run Restore again.
 

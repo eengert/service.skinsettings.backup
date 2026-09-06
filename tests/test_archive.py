@@ -128,14 +128,26 @@ class ArchiveTests(unittest.TestCase):
                 with self.assertRaises(archive.BackupError):
                     archive.build_archive(files, metadata)
 
-    def test_archive_rejects_undeclared_skin_user_directory(self):
+    def test_archive_accepts_safe_inferred_skin_user_directory(self):
         files = {
             f"addon_data/{SKIN_ID}/settings.xml": SETTINGS,
             f"addon_data/script.skinvariables/logins/{SKIN_ID}/skinusers.json": b"[]",
             f"addon_data/script.skinvariables/nodes/{SKIN_ID}-user-Invented/main.json": b"{}",
         }
-        with self.assertRaises(archive.BackupError):
-            archive.build_archive(files, self.metadata())
+        _manifest, restored = archive.read_archive(archive.build_archive(files, self.metadata()))
+        self.assertEqual(files, restored)
+
+    def test_collects_inferred_skin_user_directory_without_declaration(self):
+        self.write(f"addon_data/{SKIN_ID}/settings.xml", SETTINGS)
+        profile_file = (
+            f"addon_data/script.skinvariables/nodes/{SKIN_ID}-user-Family/"
+            "skinvariables-shortcut-homewidgets.json"
+        )
+        self.write(profile_file, b'[{"label":"Family widget"}]')
+
+        files = archive.collect_files(self.profile, SKIN_ID)
+
+        self.assertEqual(b'[{"label":"Family widget"}]', files[profile_file])
 
     def test_rejects_nested_setting_and_ntfs_stream_path(self):
         with self.assertRaises(archive.BackupError):

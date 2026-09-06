@@ -188,6 +188,19 @@ def _inferred_skin_user_slugs(root: Path, skin_id: str) -> Tuple[str, ...]:
     return tuple(sorted(found))
 
 
+def _file_skin_user_slugs(paths: Iterable[str], skin_id: str) -> Tuple[str, ...]:
+    """Infer helper-standard profile slugs from an already bounded path set."""
+    prefix = f"addon_data/script.skinvariables/nodes/{skin_id}-"
+    found = []
+    for path in paths:
+        if not isinstance(path, str) or not path.startswith(prefix):
+            continue
+        directory = path[len(prefix):].split("/", 1)[0]
+        if _SKIN_USER_SLUG.fullmatch(directory):
+            found.append(directory)
+    return tuple(sorted(set(found)))
+
+
 def _enumerate_managed(root: Path, skin_id: str, skin_user_slugs: Iterable[str] = ()) -> Tuple[str, ...]:
     _assert_root_directory(root)
     found = []
@@ -319,7 +332,8 @@ def _validate_files(files: Mapping[str, bytes], skin_id: str, require_settings: 
         raise BackupError("backup contains too many files")
     checked: Dict[str, bytes] = {}
     skinusers_data = files.get(_skinusers_path(skin_id))
-    skin_user_slugs = _skin_user_slugs(skinusers_data) if skinusers_data is not None else ()
+    declared_slugs = _skin_user_slugs(skinusers_data) if skinusers_data is not None else ()
+    skin_user_slugs = tuple(sorted(set(declared_slugs) | set(_file_skin_user_slugs(files, skin_id))))
     total = 0
     for path, data in files.items():
         valid_path = _validate_relative_path(path, skin_id, skin_user_slugs)
@@ -346,11 +360,14 @@ def collect_files(profile_path: os.PathLike | str, skin_id: str) -> Dict[str, by
     """Collect and validate a consistent snapshot of the managed files."""
     validate_skin_id(skin_id)
     root = Path(profile_path)
-    skin_user_slugs = _current_skin_user_slugs(root, skin_id)
+    skin_user_slugs = tuple(sorted(set(_current_skin_user_slugs(root, skin_id)) |
+                                   set(_inferred_skin_user_slugs(root, skin_id))))
     first_paths = _enumerate_managed(root, skin_id, skin_user_slugs)
     settings = _settings_path(skin_id)
     files = _read_snapshot(root, first_paths)
-    if skin_user_slugs != _current_skin_user_slugs(root, skin_id) or first_paths != _enumerate_managed(root, skin_id, skin_user_slugs):
+    current_slugs = tuple(sorted(set(_current_skin_user_slugs(root, skin_id)) |
+                                 set(_inferred_skin_user_slugs(root, skin_id))))
+    if skin_user_slugs != current_slugs or first_paths != _enumerate_managed(root, skin_id, skin_user_slugs):
         raise BackupError("managed files changed while being collected")
     # Kodi treats a missing skin settings file as an empty/default settings set.
     # Preserve that state explicitly so helper data can still be backed up and a
@@ -499,7 +516,8 @@ def read_archive(blob: bytes) -> Tuple[Dict[str, object], Dict[str, bytes]]:
             expected_size, expected_digest = expected[skinusers_relative]
             if len(skinusers_data) != expected_size or hashlib.sha256(skinusers_data).hexdigest() != expected_digest:
                 raise BackupError("Skin Variables user declarations failed verification")
-        skin_user_slugs = _skin_user_slugs(skinusers_data)
+        skin_user_slugs = tuple(sorted(set(_skin_user_slugs(skinusers_data)) |
+                                       set(_file_skin_user_slugs(expected, str(metadata["skin_id"])))))
         for path in expected:
             _validate_relative_path(path, str(metadata["skin_id"]), skin_user_slugs)
         files = {}
@@ -669,7 +687,8 @@ def restore_files(
         # Restore is also a repair path. The corrupt declaration itself is snapshotted raw below.
         declared_current_slugs = ()
     current_slugs = tuple(sorted(set(declared_current_slugs) | set(_inferred_skin_user_slugs(root, skin_id))))
-    incoming_slugs = _skin_user_slugs(checked.get(_skinusers_path(skin_id)))
+    incoming_slugs = tuple(sorted(set(_skin_user_slugs(checked.get(_skinusers_path(skin_id)))) |
+                                  set(_file_skin_user_slugs(checked, skin_id))))
     transaction_slugs = tuple(sorted(set(current_slugs) | set(incoming_slugs)))
     existing_paths = _enumerate_managed(root, skin_id, transaction_slugs)
     existing = _read_snapshot(root, existing_paths)
