@@ -50,6 +50,33 @@ def atomic_json(path, data):
             os.unlink(temp)
 
 
+def atomic_bytes(path, data):
+    """Durably replace a local file without exposing a partial XML document."""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    if os.path.islink(directory) or os.path.islink(path):
+        raise BackupError('Cannot safely persist skin settings through a symbolic link.')
+    temp = path + '.' + uuid.uuid4().hex + '.tmp'
+    try:
+        with open(temp, 'wb') as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        try:
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError:
+            # Some Kodi platforms do not permit directory fsync after an otherwise valid replace.
+            pass
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
 def read_json(path, default=None):
     if not os.path.exists(path):
         return {} if default is None else default
@@ -115,6 +142,14 @@ def skin_settings_document(values):
         node = ET.SubElement(root, 'setting', {'id': item['id'], 'type': kind})
         node.text = ('true' if item['value'] else 'false') if kind == 'bool' else item['value']
     return ET.tostring(root, encoding='utf-8', xml_declaration=True)
+
+
+def skin_settings_equal(left, right):
+    """Compare typed setting maps without depending on Kodi's XML serialization order."""
+    if left is None or right is None or len(left) != len(right):
+        return False
+    return ({item['id']: (item['type'], item['value']) for item in left} ==
+            {item['id']: (item['type'], item['value']) for item in right})
 
 
 @contextlib.contextmanager
@@ -229,28 +264,57 @@ class App:
         except (OSError, ET.ParseError, ValueError):
             return False
 
+    def saved_skin_setting_values(self, skin):
+        path = self.skin_settings_path(skin)
+        try:
+            with open(path, 'rb') as handle:
+                data = handle.read()
+            return skin_setting_values(
+                {'addon_data/{}/settings.xml'.format(skin): data}, skin)
+        except (OSError, BackupError):
+            return None
+
     def persist_skin_settings(self, skin, force=False):
-        """Ask Kodi to write the active skin's in-memory settings through its native saver."""
+        """Persist the active live map, repairing Kodi's missing document when necessary."""
         validate_skin_id(skin)
         if skin != xbmc.getSkinDir():
             raise BackupError('The active skin changed before its settings could be saved.')
         if not force and self.skin_settings_valid(skin):
-            return True
-        xbmc.executebuiltin('Skin.SetString({},{})'.format(PERSISTENCE_MARKER, PERSISTENCE_VALUE))
-        # Kodi's skin settings saver is intentionally deferred by 500 ms.
-        self.pause(0.75)
-        if skin != xbmc.getSkinDir():
-            raise BackupError('The active skin changed while its settings were being saved.')
-        if not self.skin_settings_valid(skin):
-            xbmc.log('{}: Kodi did not persist settings.xml for {}'.format(TITLE, skin), xbmc.LOGWARNING)
-            return False
-        return True
+            return 'existing'
 
-    def apply_skin_settings(self, skin, values):
-        """Apply archived values to Kodi's active skin and verify its live setting map."""
+        # Create the profile directory before asking Kodi's deferred saver to use it.
+        path = self.skin_settings_path(skin)
+        directory = os.path.dirname(path)
+        os.makedirs(directory, exist_ok=True)
+        if os.path.islink(directory) or os.path.islink(path):
+            raise BackupError('Cannot safely persist skin settings through a symbolic link.')
+        xbmc.executebuiltin(
+            'Skin.SetString({},{})'.format(PERSISTENCE_MARKER, PERSISTENCE_VALUE), True)
+
+        # Kodi normally saves 500 ms later. Observe the result instead of assuming a fixed
+        # delay was enough on a busy tvOS device.
+        expected = live_skin_setting_values(skin)
+        for _attempt in range(20):
+            self.pause(0.25)
+            if skin != xbmc.getSkinDir():
+                raise BackupError('The active skin changed while its settings were being saved.')
+            if skin_settings_equal(self.saved_skin_setting_values(skin), expected):
+                return 'native'
+
+        # The live JSON map is authoritative. A verified atomic copy both protects the
+        # current device and gives Kodi a document to load on its next skin activation.
+        atomic_bytes(path, skin_settings_document(expected))
+        if not skin_settings_equal(self.saved_skin_setting_values(skin), expected):
+            raise BackupError('Kodi did not persist the skin settings and the recovery write failed.')
+        xbmc.log('{}: repaired settings.xml from {} live settings for {}'.format(
+            TITLE, len(expected), skin), xbmc.LOGWARNING)
+        return 'repaired'
+
+    def load_restored_skin_settings(self, skin, values):
+        """Verify the document Kodi loaded when the restored skin was activated."""
         validate_skin_id(skin)
         if skin != xbmc.getSkinDir() or not isinstance(values, list):
-            raise BackupError('Kodi is not ready to apply the restored skin settings.')
+            raise BackupError('Kodi is not ready to load the restored skin settings.')
         checked = []
         for item in values:
             if (not isinstance(item, dict) or set(item) != {'id', 'type', 'value'} or
@@ -263,30 +327,23 @@ class App:
         if len({item['id'] for item in checked}) != len(checked):
             raise BackupError('The pending restore contains duplicate skin settings.')
 
-        live = rpc('Settings.GetSkinSettings')
-        if not isinstance(live, dict) or live.get('skin') != skin or not isinstance(live.get('settings'), list):
-            raise BackupError('Kodi did not expose the active skin settings.')
-        available = {item.get('id'): item.get('type') for item in live['settings'] if isinstance(item, dict)}
-        for item in checked:
-            if item['id'] in available:
-                continue
-            command = 'Skin.SetBool({})' if item['type'] == 'boolean' else 'Skin.SetString({},1)'
-            xbmc.executebuiltin(command.format(item['id']))
-
-        # Reset values that exist only on the target device, then apply the complete source set.
-        xbmc.executebuiltin('Skin.ResetSettings')
-        for item in checked:
-            rpc('Settings.SetSkinSettingValue', setting=item['id'], value=item['value'])
-        if not self.persist_skin_settings(skin, force=True):
-            raise BackupError('Kodi applied the restored settings in memory but could not persist them.')
-
-        # Reload from the just-persisted document so Kodi and the skin helper both
-        # discard the target device's cached values before AF3 is regenerated.
-        xbmc.executebuiltin('ReloadSkin()')
-        self.pause(2)
-        if skin != xbmc.getSkinDir():
-            raise BackupError('The active skin changed while restored settings were being verified.')
-        self.verify_live_skin_settings(skin, checked)
+        # restore_files replaced settings.xml while this skin was inactive, so activating
+        # it loaded the complete document as one unit. ReloadSkin is deliberately avoided:
+        # Kodi saves its current live state before reloading and could overwrite this file.
+        if not skin_settings_equal(self.saved_skin_setting_values(skin), checked):
+            raise BackupError('The restored skin settings document changed before Kodi could load it.')
+        last_error = None
+        for _attempt in range(20):
+            if skin != xbmc.getSkinDir():
+                raise BackupError('The active skin changed while restored settings were being verified.')
+            try:
+                self.verify_live_skin_settings(skin, checked)
+                return
+            except BackupError as exc:
+                last_error = exc
+                self.pause(0.25)
+        raise BackupError('Kodi did not load the complete restored settings document. '
+                          'Switch to another skin and reactivate this skin before retrying Finish restored skin.') from last_error
 
     def verify_live_skin_settings(self, skin, values):
         live = rpc('Settings.GetSkinSettings')
@@ -312,7 +369,7 @@ class App:
                 raise BackupError('Finish or recover the pending restore before making another backup.')
             skin = xbmc.getSkinDir()
             validate_skin_id(skin)
-            persisted = self.persist_skin_settings(skin, force=True)
+            persistence = self.persist_skin_settings(skin, force=True)
             state = self.state()
             key = self.key(skin)
             previous = state['skins'].get(key, {})
@@ -372,8 +429,8 @@ class App:
             message = 'Saved {} skin settings and {} files ({:.1f} KB){}.'.format(
                 stats['settings'], len(files), len(blob) / 1024,
                 ' as a protected snapshot' if protected else '')
-            if not persisted:
-                message += ' Kodi did not create settings.xml; defaults and helper data were still backed up.'
+            if persistence == 'repaired':
+                message += ' Repaired the missing settings.xml from Kodi’s live settings.'
             return message
 
     def switch_skin(self, skin):
@@ -472,7 +529,7 @@ class App:
             if xbmc.getSkinDir() != skin:
                 raise BackupError('Activate {} and accept the skin change, then choose Finish restored skin.'.format(skin))
             if 'skin_settings' in pending:
-                self.apply_skin_settings(skin, pending['skin_settings'])
+                self.load_restored_skin_settings(skin, pending['skin_settings'])
             self.clear_helper_cache(skin, pending.get('paths', []))
             for setting in APPEARANCE:
                 if setting not in pending.get('appearance', {}):

@@ -4,7 +4,7 @@ A small Kodi program and background service for versioned skin-setting backups. 
 
 ## Install and use
 
-1. In Kodi, enable installation from unknown sources if needed, then **Add-ons → Install from zip file**, selecting `service.skinsettings.backup-1.0.5.zip`.
+1. In Kodi, enable installation from unknown sources if needed, then **Add-ons → Install from zip file**, selecting `service.skinsettings.backup-1.0.7.zip`.
 2. Open **Program add-ons → Skin Settings Backup → Settings → Backup destination**. Select a writable folder in Kodi’s folder picker, preferably on a Mac or NAS. Network sources added in Kodi’s File Manager are available in the picker. The add-on menu’s **Choose destination** action also opens a folder picker. Configure share authentication through Kodi's network sources instead of embedding passwords in the path.
 3. Select **Back up now** to create and verify your initial protected snapshot. Select **Save protected snapshot** before a skin update or after a major customization.
 4. In Settings, select an interval (1, 6, 12, 24 or 168 hours) and how many automatic backups to keep (default 14). Scheduling is enabled once a destination is set. The first snapshot and explicitly protected snapshots never expire.
@@ -33,7 +33,7 @@ If settings controls appear without labels after a manually copied development i
 
 Kodi does not always keep the on-disk skin `settings.xml` synchronized with its live settings, especially on tvOS. Backups therefore capture the active skin's authoritative live bool/string setting map through Kodi's JSON-RPC API and encode it as a portable `settings.xml`. The file on disk remains a persistence safeguard rather than the backup source. Skin Variables profile folders are discovered from both its user declaration and its existing profile node directories.
 
-The service checks for a valid active-skin `settings.xml` every five minutes while Kodi is idle and asks Kodi's native skin-setting saver to create it when missing. Every backup also forces a native save, but the archive is built from Kodi's live setting map so a missing or stale file cannot silently produce an empty backup. A manual backup reports exactly how many skin settings and helper files were saved.
+The service checks for a valid active-skin `settings.xml` every five minutes while Kodi is idle and asks Kodi's native skin-setting saver to create it when missing. It creates the profile directory first and polls until the saved document matches Kodi's complete live setting map. If Kodi's delayed saver still does not finish, the add-on atomically writes and verifies that live map itself. Every backup repeats this guard, and the archive is also built directly from the live map so a missing or stale file cannot silently produce an empty backup. A manual backup reports exactly how many skin settings and helper files were saved and whether it repaired the persistence file.
 
 AF3 is the first skin with a dedicated rebuild adapter. Generic support restores the main settings XML; a different skin's separately stored helper configuration may need another adapter. Linked artwork, playlists and widget-provider add-ons must still be available at their original paths. A backup is not a full portable Kodi installation.
 
@@ -45,7 +45,7 @@ When restoring the active skin, the add-on switches to Estuary (or Estouchy when
 
 Before writing settings, the add-on saves a durable local rollback copy. It validates paths, checksums, XML and JSON, replaces only the managed files, and removes stale managed JSON files. It attempts rollback if writing fails. After restoring, accept activation of the restored skin and Kodi's skin-change prompt. AF3 then rebuilds its generated views and menus. This rebuild and Kodi's skin switches take longer than copying the tiny backup archive.
 
-After activating the restored skin, the add-on also applies every archived bool and string setting through Kodi's live skin-settings API, persists the result through Kodi's native saver, reloads the skin from that document, and verifies the live values before rebuilding AF3. This prevents a target device's cached skin state from winning over the files imported from another device.
+Activating the restored skin makes Kodi load the complete transactionally restored `settings.xml`; the add-on waits for and verifies every live value before rebuilding AF3. It does not call `ReloadSkin`, because Kodi saves the current live state before reloading and could overwrite the imported document. It also does not reset the skin or replay settings one at a time; a rejected per-setting API call can otherwise leave the skin blank after the reset has already happened.
 
 If you choose to activate the skin later, select **Finish restored skin** after activating it; the service also finishes when that skin becomes active and idle. If Kodi closed during restoration, use **Recover interrupted restore** from a different skin. Completed writes interrupted just before rebuilding are resumed; partially applied writes are rolled back. Scheduling pauses while a restore remains unfinished. Local transaction copies remain in this add-on's `rollback` folder for inspection; they are not automatically expired in version 1.
 

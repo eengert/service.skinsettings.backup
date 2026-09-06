@@ -80,18 +80,18 @@ class StorageTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def manifest(self, stamp="2026-09-06T140000Z", protected=False):
+    def manifest(self, stamp="2026-09-06T14:00:00Z", protected=False):
         return {"skin_id": "skin.example", "skin_version": "1.0", "device_id": "test-device",
                 "device_name": "Test Device", "profile_id": "master", "created_at": stamp,
                 "protected": protected}
 
-    def valid_archive(self, label, stamp="2026-09-06T140000Z", protected=False):
+    def valid_archive(self, label, stamp="2026-09-06T14:00:00Z", protected=False):
         return build_archive(
             {"addon_data/skin.example/settings.xml":
              ("<settings><setting id=\"label\">{}</setting></settings>".format(label)).encode()},
             self.manifest(stamp, protected))
 
-    def publish(self, blob=b"PK\x03\x04archive", stamp="2026-09-06T140000Z", protected=False):
+    def publish(self, blob=b"PK\x03\x04archive", stamp="2026-09-06T14:00:00Z", protected=False):
         return self.store.publish(blob, self.manifest(stamp, protected))
 
     def test_publish_load_and_records_round_trip(self):
@@ -122,21 +122,21 @@ class StorageTests(unittest.TestCase):
             self.store.load(record)
 
     def test_failed_upload_never_prunes_earlier_committed_record(self):
-        earlier = self.publish(b"earlier", "2026-09-06T140000Z")
+        earlier = self.publish(b"earlier", "2026-09-06T14:00:00Z")
         self.store.vfs.copy_allowed = False
 
         with self.assertRaises(BackupError):
-            self.publish(b"new", "2026-09-06T140001Z")
+            self.publish(b"new", "2026-09-06T14:00:01Z")
 
         self.assertEqual([earlier], self.store.records())
 
     def test_protected_snapshots_survive_retention(self):
-        protected = self.publish(self.valid_archive("protected", "2026-09-06T140000Z", True),
-                                 "2026-09-06T140000Z", protected=True)
-        ordinary_old = self.publish(self.valid_archive("old", "2026-09-06T140001Z"),
-                                    "2026-09-06T140001Z", protected=False)
-        ordinary_new = self.publish(self.valid_archive("new", "2026-09-06T140002Z"),
-                                    "2026-09-06T140002Z", protected=False)
+        protected = self.publish(self.valid_archive("protected", "2026-09-06T14:00:00Z", True),
+                                 "2026-09-06T14:00:00Z", protected=True)
+        ordinary_old = self.publish(self.valid_archive("old", "2026-09-06T14:00:01Z"),
+                                    "2026-09-06T14:00:01Z", protected=False)
+        ordinary_new = self.publish(self.valid_archive("new", "2026-09-06T14:00:02Z"),
+                                    "2026-09-06T14:00:02Z", protected=False)
 
         self.store.prune(keep=1)
 

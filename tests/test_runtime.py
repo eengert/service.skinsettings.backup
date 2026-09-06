@@ -133,7 +133,7 @@ xbmc.Player = _Player
 xbmc.getSkinDir = lambda: ENV.skin
 xbmc.getInfoLabel = lambda _label: "Test Kodi"
 xbmc.getCondVisibility = lambda _condition: True
-xbmc.executebuiltin = lambda _command: None
+xbmc.executebuiltin = lambda _command, _wait=False: None
 xbmc.executeJSONRPC = lambda _request: json.dumps({"jsonrpc": "2.0", "id": 1, "result": True})
 xbmc.log = lambda *_args: None
 
@@ -259,7 +259,7 @@ class RuntimeTests(unittest.TestCase):
         settings_path = ENV.addon_data / SKIN_ID / "settings.xml"
         settings_path.unlink()
 
-        def persist(command):
+        def persist(command, _wait=False):
             if command == "Skin.SetString(service.skinsettings.backup.persist,1)":
                 self.write_settings(3, "persisted")
 
@@ -267,17 +267,23 @@ class RuntimeTests(unittest.TestCase):
             result = self.app.backup()
 
         self.assertTrue(result.startswith("Saved"))
-        execute.assert_called_once_with("Skin.SetString(service.skinsettings.backup.persist,1)")
+        execute.assert_called_once_with("Skin.SetString(service.skinsettings.backup.persist,1)", True)
         self.assertEqual(3, self.state_entry()["stats"]["settings"])
 
-    def test_backup_retains_missing_settings_fallback_if_kodi_cannot_persist(self):
+    def test_backup_repairs_missing_settings_file_from_live_map(self):
         settings_path = ENV.addon_data / SKIN_ID / "settings.xml"
         settings_path.unlink()
+        live = [
+            {"id": "family.category", "type": "string", "value": "Movies"},
+            {"id": "family.enabled", "type": "boolean", "value": True},
+        ]
 
-        result = self.app.backup()
+        with mock.patch.object(runtime, "live_skin_setting_values", return_value=live):
+            result = self.app.backup()
 
-        self.assertIn("Kodi did not create settings.xml", result)
-        self.assertEqual(0, self.state_entry()["stats"]["settings"])
+        self.assertIn("Repaired the missing settings.xml", result)
+        self.assertEqual(live, self.app.saved_skin_setting_values(SKIN_ID))
+        self.assertEqual(2, self.state_entry()["stats"]["settings"])
 
     def test_backup_uses_live_settings_instead_of_stale_disk_document(self):
         live = [
@@ -311,43 +317,20 @@ class RuntimeTests(unittest.TestCase):
             runtime.skin_setting_values(files, SKIN_ID),
         )
 
-    def test_live_restore_creates_missing_ids_resets_target_and_verifies_values(self):
+    def test_restore_loads_complete_document_without_reset_or_per_setting_rpc(self):
         values = [
             {"id": "source.string", "type": "string", "value": "Family"},
             {"id": "source.bool", "type": "boolean", "value": False},
         ]
-        live = {"target.only": ("string", "Bonus")}
+        settings_path = ENV.addon_data / SKIN_ID / "settings.xml"
+        settings_path.write_bytes(runtime.skin_settings_document(values))
 
-        def execute(command):
-            if command == "Skin.SetString(source.string,1)":
-                live["source.string"] = ("string", "1")
-            elif command == "Skin.SetBool(source.bool)":
-                live["source.bool"] = ("boolean", True)
-            elif command == "Skin.ResetSettings":
-                live.update({key: (kind, False if kind == "boolean" else "")
-                             for key, (kind, _value) in live.items()})
-            elif command == "Skin.SetString(service.skinsettings.backup.persist,1)":
-                live[runtime.PERSISTENCE_MARKER] = ("string", "1")
+        with mock.patch.object(runtime.xbmc, "executebuiltin") as execute, \
+                mock.patch.object(self.app, "verify_live_skin_settings") as verify:
+            self.app.load_restored_skin_settings(SKIN_ID, values)
 
-        def settings_rpc(method, **params):
-            if method == "Settings.GetSkinSettings":
-                return {"skin": SKIN_ID, "settings": [
-                    {"id": key, "type": kind, "value": value}
-                    for key, (kind, value) in live.items()
-                ]}
-            if method == "Settings.SetSkinSettingValue":
-                kind = live[params["setting"]][0]
-                live[params["setting"]] = (kind, params["value"])
-                return params["value"]
-            self.fail("unexpected RPC method: {}".format(method))
-
-        with mock.patch.object(runtime.xbmc, "executebuiltin", side_effect=execute), \
-                mock.patch.object(runtime, "rpc", side_effect=settings_rpc):
-            self.app.apply_skin_settings(SKIN_ID, values)
-
-        self.assertEqual(("string", ""), live["target.only"])
-        self.assertEqual(("string", "Family"), live["source.string"])
-        self.assertEqual(("boolean", False), live["source.bool"])
+        execute.assert_not_called()
+        verify.assert_called_once_with(SKIN_ID, values)
 
     def test_appearance_is_captured_and_appearance_only_change_creates_backup(self):
         appearance = {
@@ -581,8 +564,8 @@ class RuntimeTests(unittest.TestCase):
         )
         order = []
 
-        with mock.patch.object(self.app, "apply_skin_settings",
-                               side_effect=lambda skin, settings: order.append(("apply", skin, settings))), \
+        with mock.patch.object(self.app, "load_restored_skin_settings",
+                               side_effect=lambda skin, settings: order.append(("load", skin, settings))), \
                 mock.patch.object(self.app, "clear_helper_cache",
                                   side_effect=lambda skin, paths: order.append(("clear", skin, paths))), \
                 mock.patch.object(self.app, "rebuild_af3",
@@ -593,7 +576,7 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             [
-                ("apply", runtime.AF3, values),
+                ("load", runtime.AF3, values),
                 ("clear", runtime.AF3, []),
                 ("rebuild", runtime.AF3),
                 ("verify", runtime.AF3, values),
@@ -622,7 +605,7 @@ class RuntimeTests(unittest.TestCase):
         def overwrite(_pending):
             helper_path.write_bytes(b'{"target":true}')
 
-        with mock.patch.object(self.app, "apply_skin_settings"), \
+        with mock.patch.object(self.app, "load_restored_skin_settings"), \
                 mock.patch.object(self.app, "rebuild_af3", side_effect=overwrite):
             with self.assertRaisesRegex(runtime.BackupError, "did not remain applied"):
                 self.app.finish_restore()
