@@ -4,8 +4,8 @@ A small Kodi program and background service for versioned skin-setting backups. 
 
 ## Install and use
 
-1. In Kodi, enable installation from unknown sources if needed, then **Add-ons → Install from zip file**, selecting `service.skinsettings.backup-1.0.1.zip`.
-2. Open **Program add-ons → Skin Settings Backup → Choose destination**. Pick a writable folder, preferably on a Mac or NAS. You can also type a path such as `smb://server/share/KodiBackups` in Settings. Configure share authentication through Kodi's network sources instead of embedding passwords in the path.
+1. In Kodi, enable installation from unknown sources if needed, then **Add-ons → Install from zip file**, selecting `service.skinsettings.backup-1.0.2.zip`.
+2. Open **Program add-ons → Skin Settings Backup → Settings → Backup destination**. Select a writable folder in Kodi’s folder picker, preferably on a Mac or NAS. Network sources added in Kodi’s File Manager are available in the picker. The add-on menu’s **Choose destination** action also opens a folder picker. Configure share authentication through Kodi's network sources instead of embedding passwords in the path.
 3. Select **Back up now** to create and verify your initial protected snapshot. Select **Save protected snapshot** before a skin update or after a major customization.
 4. In Settings, select an interval (1, 6, 12, 24 or 168 hours) and how many automatic backups to keep (default 14). Scheduling is enabled once a destination is set. The first snapshot and explicitly protected snapshots never expire.
 

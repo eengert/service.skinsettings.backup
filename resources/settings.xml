@@ -3,9 +3,10 @@
   <section id="service.skinsettings.backup">
     <category id="general" label="32000">
       <group id="1">
-        <setting id="destination" type="string" label="32001" help="32011">
-          <level>0</level><default/><constraints><allowempty>true</allowempty></constraints>
-          <control type="edit" format="string"><heading>32001</heading></control>
+        <setting id="destination" type="path" label="32001" help="32011">
+          <level>0</level><default/>
+          <constraints><sources><source>files</source></sources><writable>true</writable><allowempty>true</allowempty></constraints>
+          <control type="button" format="path"><heading>32001</heading></control>
         </setting>
         <setting id="device_name" type="string" label="32002">
           <level>0</level><default/><constraints><allowempty>true</allowempty></constraints>

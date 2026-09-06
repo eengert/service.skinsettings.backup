@@ -50,3 +50,9 @@ The local development installation was registered using UpdateLocalAddons, which
 The native self-test now checks all settings labels, help text and interval options, in addition to values and backup/restore functionality. All seven native checks pass and the 36 automated tests pass. The language-loading failure was reproduced before the restart.
 
 Added an original AI-generated 512-pixel thumbnail, declared it in metadata, and taught packaging to include declared assets. Runtime settings and backup behavior are unchanged. Updated installation troubleshooting in README.
+
+## Version 1.0.2 — destination folder picker
+
+Changed Backup destination from a text editor to Kodi's native writable path picker, including File Manager sources. The setting ID is unchanged and path values remain strings, preserving existing destinations. Updated help and installation instructions.
+
+All 36 automated tests pass. Installed 1.0.2 in idle local Kodi and visually verified that selecting Backup destination opens the native folder picker; cancelled without changing the destination. Repository index, checksums and packaged content were checked, with other add-ons unchanged.

@@ -34,7 +34,7 @@ msgid "Notify after scheduled backups"
 msgstr ""
 
 msgctxt "#32011"
-msgid "Use Choose destination in the add-on menu, or enter a writable local or network folder, such as smb://server/share/KodiBackups. Store passwords in Kodi's network source settings."
+msgid "Select a writable local or network folder using Kodi's folder picker. Network sources added in File Manager are available here. Store passwords in Kodi's network source settings."
 msgstr ""
 
 msgctxt "#32012"
