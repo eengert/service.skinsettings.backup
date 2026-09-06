@@ -25,6 +25,7 @@ AF3 = 'skin.arctic.fuse.3'
 APPEARANCE = ('lookandfeel.skintheme', 'lookandfeel.skincolors', 'lookandfeel.font', 'lookandfeel.skinzoom')
 PERSISTENCE_MARKER = 'service.skinsettings.backup.persist'
 PERSISTENCE_VALUE = '1'
+SKIN_SETTING_ID = re.compile(r'^[A-Za-z0-9_.-]{1,256}$')
 
 
 def rpc(method, **params):
@@ -57,6 +58,32 @@ def read_json(path, default=None):
             return json.load(handle)
     except (OSError, ValueError) as exc:
         raise BackupError('A local backup state file is damaged. Existing archives are unchanged.') from exc
+
+
+def skin_setting_values(files, skin):
+    """Decode the verified settings document into JSON-safe values for live application."""
+    relative = 'addon_data/{}/settings.xml'.format(validate_skin_id(skin))
+    try:
+        root = ET.fromstring(files[relative])
+    except (KeyError, ET.ParseError, ValueError) as exc:
+        raise BackupError('The backup has no usable skin settings document.') from exc
+    values, seen = [], set()
+    for item in root.findall('setting'):
+        setting_id = item.get('id') or item.get('name')
+        if not setting_id or not SKIN_SETTING_ID.fullmatch(setting_id) or setting_id in seen:
+            raise BackupError('The backup contains an invalid or duplicate skin setting id.')
+        seen.add(setting_id)
+        kind = item.get('type') or 'string'
+        if kind == 'bool':
+            value = (item.text or '').strip().lower() == 'true'
+            json_type = 'boolean'
+        elif kind == 'string':
+            value = item.text or ''
+            json_type = 'string'
+        else:
+            raise BackupError('The backup contains an unsupported skin setting type.')
+        values.append({'id': setting_id, 'type': json_type, 'value': value})
+    return values
 
 
 @contextlib.contextmanager
@@ -188,6 +215,56 @@ class App:
             return False
         return True
 
+    def apply_skin_settings(self, skin, values):
+        """Apply archived values to Kodi's active skin and verify its live setting map."""
+        validate_skin_id(skin)
+        if skin != xbmc.getSkinDir() or not isinstance(values, list):
+            raise BackupError('Kodi is not ready to apply the restored skin settings.')
+        checked = []
+        for item in values:
+            if (not isinstance(item, dict) or set(item) != {'id', 'type', 'value'} or
+                    not isinstance(item['id'], str) or not SKIN_SETTING_ID.fullmatch(item['id']) or
+                    item['type'] not in ('boolean', 'string') or
+                    (item['type'] == 'boolean' and not isinstance(item['value'], bool)) or
+                    (item['type'] == 'string' and not isinstance(item['value'], str))):
+                raise BackupError('The pending restore contains invalid skin settings.')
+            checked.append(item)
+        if len({item['id'] for item in checked}) != len(checked):
+            raise BackupError('The pending restore contains duplicate skin settings.')
+
+        live = rpc('Settings.GetSkinSettings')
+        if not isinstance(live, dict) or live.get('skin') != skin or not isinstance(live.get('settings'), list):
+            raise BackupError('Kodi did not expose the active skin settings.')
+        available = {item.get('id'): item.get('type') for item in live['settings'] if isinstance(item, dict)}
+        for item in checked:
+            if item['id'] in available:
+                continue
+            command = 'Skin.SetBool({})' if item['type'] == 'boolean' else 'Skin.SetString({},1)'
+            xbmc.executebuiltin(command.format(item['id']))
+
+        # Reset values that exist only on the target device, then apply the complete source set.
+        xbmc.executebuiltin('Skin.ResetSettings')
+        for item in checked:
+            rpc('Settings.SetSkinSettingValue', setting=item['id'], value=item['value'])
+        if not self.persist_skin_settings(skin, force=True):
+            raise BackupError('Kodi applied the restored settings in memory but could not persist them.')
+
+        # Reload from the just-persisted document so Kodi and the skin helper both
+        # discard the target device's cached values before AF3 is regenerated.
+        xbmc.executebuiltin('ReloadSkin()')
+        self.pause(2)
+        if skin != xbmc.getSkinDir():
+            raise BackupError('The active skin changed while restored settings were being verified.')
+        live = rpc('Settings.GetSkinSettings')
+        if not isinstance(live, dict) or live.get('skin') != skin or not isinstance(live.get('settings'), list):
+            raise BackupError('Kodi did not expose the reloaded skin settings.')
+        current = {item.get('id'): (item.get('type'), item.get('value'))
+                   for item in live.get('settings', []) if isinstance(item, dict)}
+        mismatched = [item['id'] for item in checked
+                      if current.get(item['id']) != (item['type'], item['value'])]
+        if mismatched:
+            raise BackupError('Kodi did not apply {} restored skin setting(s).'.format(len(mismatched)))
+
     def backup(self, manual=False, protected=False):
         with operation_lock(self.lock_path):
             if os.path.exists(self.pending_path) or self.incomplete():
@@ -306,7 +383,8 @@ class App:
             pending = {'skin_id': skin, 'phase': 'restoring', 'created_at': manifest['created_at'],
                        'paths': list(files), 'started_at': time.time(),
                        'known_transactions': sorted(os.listdir(self.rollback_root)) if os.path.isdir(self.rollback_root) else [],
-                       'appearance': manifest.get('appearance', {})}
+                       'appearance': manifest.get('appearance', {}),
+                       'skin_settings': skin_setting_values(files, skin)}
             atomic_json(self.pending_path, pending)
             try:
                 rollback = restore_files(self.profile, skin, files, self.rollback_root)
@@ -346,6 +424,8 @@ class App:
             skin = pending['skin_id']
             if xbmc.getSkinDir() != skin:
                 raise BackupError('Activate {} and accept the skin change, then choose Finish restored skin.'.format(skin))
+            if 'skin_settings' in pending:
+                self.apply_skin_settings(skin, pending['skin_settings'])
             self.clear_helper_cache(skin, pending.get('paths', []))
             for setting in APPEARANCE:
                 if setting not in pending.get('appearance', {}):
@@ -540,9 +620,6 @@ def run_service():
             now = time.time()
             idle = not xbmc.Player().isPlaying() and xbmc.getGlobalIdleTime() >= 15
             if idle and now >= retry_after:
-                if now >= next_guard:
-                    app.persist_skin_settings(xbmc.getSkinDir())
-                    next_guard = now + 300
                 if os.path.exists(app.pending_path):
                     pending = read_json(app.pending_path)
                     if pending.get('phase') == 'rebuild' and xbmc.getSkinDir() == pending.get('skin_id'):
@@ -550,7 +627,17 @@ def run_service():
                         last_error = ''
                     elif pending.get('phase') == 'restoring':
                         raise BackupError('A restore was interrupted. Open Skin Settings Backup and choose Recover interrupted restore.')
-                elif app.addon.getSettingBool('enabled') and app.addon.getSetting('destination'):
+                else:
+                    if now >= next_guard and not app.skin_settings_valid(xbmc.getSkinDir()):
+                        try:
+                            with operation_lock(app.lock_path):
+                                app.persist_skin_settings(xbmc.getSkinDir())
+                        except BackupError as exc:
+                            if str(exc) != 'Another backup or restore is already running.':
+                                raise
+                    next_guard = now + 300
+                if (not os.path.exists(app.pending_path) and app.addon.getSettingBool('enabled')
+                        and app.addon.getSetting('destination')):
                     state = app.state()
                     previous = state['skins'].get(app.key(xbmc.getSkinDir()), {})
                     interval = app.addon.getSettingInt('interval_hours') or 24

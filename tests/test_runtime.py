@@ -261,6 +261,57 @@ class RuntimeTests(unittest.TestCase):
 
         execute.assert_not_called()
 
+    def test_skin_setting_values_decodes_typed_archive_values(self):
+        relative = "addon_data/{}/settings.xml".format(SKIN_ID)
+        files = {relative: (b'<settings><setting id="alpha" type="string">Family</setting>'
+                            b'<setting id="enabled" type="bool">true</setting></settings>')}
+
+        self.assertEqual(
+            [
+                {"id": "alpha", "type": "string", "value": "Family"},
+                {"id": "enabled", "type": "boolean", "value": True},
+            ],
+            runtime.skin_setting_values(files, SKIN_ID),
+        )
+
+    def test_live_restore_creates_missing_ids_resets_target_and_verifies_values(self):
+        values = [
+            {"id": "source.string", "type": "string", "value": "Family"},
+            {"id": "source.bool", "type": "boolean", "value": False},
+        ]
+        live = {"target.only": ("string", "Bonus")}
+
+        def execute(command):
+            if command == "Skin.SetString(source.string,1)":
+                live["source.string"] = ("string", "1")
+            elif command == "Skin.SetBool(source.bool)":
+                live["source.bool"] = ("boolean", True)
+            elif command == "Skin.ResetSettings":
+                live.update({key: (kind, False if kind == "boolean" else "")
+                             for key, (kind, _value) in live.items()})
+            elif command == "Skin.SetString(service.skinsettings.backup.persist,1)":
+                live[runtime.PERSISTENCE_MARKER] = ("string", "1")
+
+        def settings_rpc(method, **params):
+            if method == "Settings.GetSkinSettings":
+                return {"skin": SKIN_ID, "settings": [
+                    {"id": key, "type": kind, "value": value}
+                    for key, (kind, value) in live.items()
+                ]}
+            if method == "Settings.SetSkinSettingValue":
+                kind = live[params["setting"]][0]
+                live[params["setting"]] = (kind, params["value"])
+                return params["value"]
+            self.fail("unexpected RPC method: {}".format(method))
+
+        with mock.patch.object(runtime.xbmc, "executebuiltin", side_effect=execute), \
+                mock.patch.object(runtime, "rpc", side_effect=settings_rpc):
+            self.app.apply_skin_settings(SKIN_ID, values)
+
+        self.assertEqual(("string", ""), live["target.only"])
+        self.assertEqual(("string", "Family"), live["source.string"])
+        self.assertEqual(("boolean", False), live["source.bool"])
+
     def test_appearance_is_captured_and_appearance_only_change_creates_backup(self):
         appearance = {
             "lookandfeel.skintheme": "SKINDEFAULT",
@@ -475,6 +526,39 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual({}, state["skins"])
         self.assertNotIn(cache_property, _Window.properties)
         self.assertTrue(_Window.properties["SkinVariables.ShortcutsNode.Reload"])
+        self.assertFalse(Path(self.app.pending_path).exists())
+
+    def test_finish_restore_applies_live_settings_before_af3_rebuild(self):
+        ENV.skin = runtime.AF3
+        values = [{"id": "family.setting", "type": "string", "value": "restored"}]
+        runtime.atomic_json(
+            self.app.pending_path,
+            {
+                "skin_id": runtime.AF3,
+                "phase": "rebuild",
+                "created_at": "2026-09-06T12:00:00Z",
+                "paths": [],
+                "skin_settings": values,
+            },
+        )
+        order = []
+
+        with mock.patch.object(self.app, "apply_skin_settings",
+                               side_effect=lambda skin, settings: order.append(("apply", skin, settings))), \
+                mock.patch.object(self.app, "clear_helper_cache",
+                                  side_effect=lambda skin, paths: order.append(("clear", skin, paths))), \
+                mock.patch.object(self.app, "rebuild_af3",
+                                  side_effect=lambda pending: order.append(("rebuild", pending["skin_id"]))):
+            self.app.finish_restore()
+
+        self.assertEqual(
+            [
+                ("apply", runtime.AF3, values),
+                ("clear", runtime.AF3, []),
+                ("rebuild", runtime.AF3),
+            ],
+            order,
+        )
         self.assertFalse(Path(self.app.pending_path).exists())
 
     def test_finish_restore_applies_only_allowed_appearance_in_defined_order(self):
