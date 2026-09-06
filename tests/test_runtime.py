@@ -231,6 +231,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(1, len(records))
         self.assertIs(True, records[0]["manifest"]["protected"])
 
+    def test_backup_asks_kodi_to_persist_skin_settings_first(self):
+        settings_path = ENV.addon_data / SKIN_ID / "settings.xml"
+        settings_path.unlink()
+
+        def persist(command):
+            if command == "Skin.SetString(service.skinsettings.backup.persist,1)":
+                self.write_settings(3, "persisted")
+
+        with mock.patch.object(runtime.xbmc, "executebuiltin", side_effect=persist) as execute:
+            result = self.app.backup()
+
+        self.assertTrue(result.startswith("Saved"))
+        execute.assert_called_once_with("Skin.SetString(service.skinsettings.backup.persist,1)")
+        self.assertEqual(3, self.state_entry()["stats"]["settings"])
+
+    def test_backup_retains_missing_settings_fallback_if_kodi_cannot_persist(self):
+        settings_path = ENV.addon_data / SKIN_ID / "settings.xml"
+        settings_path.unlink()
+
+        result = self.app.backup()
+
+        self.assertIn("Kodi did not create settings.xml", result)
+        self.assertEqual(0, self.state_entry()["stats"]["settings"])
+
+    def test_background_guard_does_not_rewrite_an_existing_valid_file(self):
+        with mock.patch.object(runtime.xbmc, "executebuiltin") as execute:
+            self.assertTrue(self.app.persist_skin_settings(SKIN_ID))
+
+        execute.assert_not_called()
+
     def test_appearance_is_captured_and_appearance_only_change_creates_backup(self):
         appearance = {
             "lookandfeel.skintheme": "SKINDEFAULT",

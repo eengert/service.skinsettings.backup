@@ -23,6 +23,8 @@ ADDON_ID = 'service.skinsettings.backup'
 TITLE = 'Skin Settings Backup'
 AF3 = 'skin.arctic.fuse.3'
 APPEARANCE = ('lookandfeel.skintheme', 'lookandfeel.skincolors', 'lookandfeel.font', 'lookandfeel.skinzoom')
+PERSISTENCE_MARKER = 'service.skinsettings.backup.persist'
+PERSISTENCE_VALUE = '1'
 
 
 def rpc(method, **params):
@@ -157,12 +159,42 @@ class App:
                 continue
         return values
 
+    def skin_settings_path(self, skin):
+        validate_skin_id(skin)
+        return os.path.join(self.profile, 'addon_data', skin, 'settings.xml')
+
+    def skin_settings_valid(self, skin):
+        path = self.skin_settings_path(skin)
+        try:
+            root = ET.parse(path).getroot()
+            return root.tag == 'settings' and all(child.tag == 'setting' for child in root)
+        except (OSError, ET.ParseError, ValueError):
+            return False
+
+    def persist_skin_settings(self, skin, force=False):
+        """Ask Kodi to write the active skin's in-memory settings through its native saver."""
+        validate_skin_id(skin)
+        if skin != xbmc.getSkinDir():
+            raise BackupError('The active skin changed before its settings could be saved.')
+        if not force and self.skin_settings_valid(skin):
+            return True
+        xbmc.executebuiltin('Skin.SetString({},{})'.format(PERSISTENCE_MARKER, PERSISTENCE_VALUE))
+        # Kodi's skin settings saver is intentionally deferred by 500 ms.
+        self.pause(0.75)
+        if skin != xbmc.getSkinDir():
+            raise BackupError('The active skin changed while its settings were being saved.')
+        if not self.skin_settings_valid(skin):
+            xbmc.log('{}: Kodi did not persist settings.xml for {}'.format(TITLE, skin), xbmc.LOGWARNING)
+            return False
+        return True
+
     def backup(self, manual=False, protected=False):
         with operation_lock(self.lock_path):
             if os.path.exists(self.pending_path) or self.incomplete():
                 raise BackupError('Finish or recover the pending restore before making another backup.')
             skin = xbmc.getSkinDir()
             validate_skin_id(skin)
+            persisted = self.persist_skin_settings(skin, force=True)
             state = self.state()
             key = self.key(skin)
             previous = state['skins'].get(key, {})
@@ -219,8 +251,12 @@ class App:
             atomic_json(self.state_path, state)
             # Retention runs only after the new archive and completion record verified successfully.
             store.prune(max(1, self.addon.getSettingInt('keep')))
-            return 'Saved {} files ({:.1f} KB){}.'.format(len(files), len(blob) / 1024,
-                                                        ' as a protected snapshot' if protected else '')
+            message = 'Saved {} files ({:.1f} KB){}.'.format(
+                len(files), len(blob) / 1024,
+                ' as a protected snapshot' if protected else '')
+            if not persisted:
+                message += ' Kodi did not create settings.xml; defaults and helper data were still backed up.'
+            return message
 
     def switch_skin(self, skin):
         if xbmc.getSkinDir() == skin:
@@ -497,13 +533,16 @@ def run_service():
     monitor = xbmc.Monitor()
     if monitor.waitForAbort(45):
         return
-    last_notice, last_error, retry_after = 0, '', 0
+    last_notice, last_error, retry_after, next_guard = 0, '', 0, 0
     while not monitor.abortRequested():
         try:
             app = App()
             now = time.time()
             idle = not xbmc.Player().isPlaying() and xbmc.getGlobalIdleTime() >= 15
             if idle and now >= retry_after:
+                if now >= next_guard:
+                    app.persist_skin_settings(xbmc.getSkinDir())
+                    next_guard = now + 300
                 if os.path.exists(app.pending_path):
                     pending = read_json(app.pending_path)
                     if pending.get('phase') == 'rebuild' and xbmc.getSkinDir() == pending.get('skin_id'):

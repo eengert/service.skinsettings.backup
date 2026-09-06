@@ -22,7 +22,7 @@ def check(condition, message):
 
 
 def run(app):
-    from resources.lib.runtime import atomic_json, operation_lock
+    from resources.lib.runtime import PERSISTENCE_MARKER, atomic_json, operation_lock
     result = {'python': platform.python_version(), 'kodi': xbmc.getInfoLabel('System.BuildVersion'),
               'tests': [], 'success': False}
     start = time.monotonic()
@@ -106,6 +106,10 @@ def run(app):
             fixture.rollback_root = os.path.join(root, 'rollback')
             fixture.pending_path = os.path.join(root, 'pending-restore.json')
             check(fixture.backup().startswith('Saved'), 'Native backup did not publish')
+            persisted = ET.parse(app.skin_settings_path(xbmc.getSkinDir())).getroot()
+            check(any(item.get('id') == PERSISTENCE_MARKER for item in persisted.findall('setting')),
+                  'Kodi did not write the skin settings persistence marker')
+            result['tests'].append('Native skin settings persistence guard')
             check(fixture.backup().startswith('No changes'), 'Unchanged backup was not skipped')
             result['tests'].append('Native backup orchestration and unchanged-backup skipping')
         result['success'] = True

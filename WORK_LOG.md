@@ -62,3 +62,9 @@ All 36 automated tests pass. Installed 1.0.2 in idle local Kodi and visually ver
 Kodi permits an active skin to have no user `settings.xml`; this represents an empty/default setting set. Backup previously treated that valid state as an error and skipped AF3 helper data. It now records a validated empty settings document while continuing to collect Skin Variables menus, widgets, views and profiles. This also gives restore an explicit representation of the default state, while reset detection still notices a later drop from a populated settings file.
 
 All 37 automated tests pass. Kodi 21.1's embedded Python passed all eight native checks, including collection from a temporary skin profile with no `settings.xml`; the live AF3 read-only snapshot also passed.
+
+## Version 1.0.4 — native persistence guard
+
+The idle service checks the active skin's `settings.xml` every five minutes and asks Kodi's native `Skin.SetString` path to recreate it when missing or invalid. Every manual or scheduled backup forces the same native save, waits beyond Kodi's deferred-save interval, validates the XML, and only then reads the snapshot. If Kodi still cannot persist it, the version 1.0.3 empty/default fallback preserves helper data and a manual backup reports the condition.
+
+The guard uses a fixed private marker so repeated saves do not create spurious backup changes. It never writes the live skin settings file directly. All 40 automated tests pass, including native-save invocation, graceful fallback, and no unnecessary background rewrite of an existing valid file. Kodi 21.1 wrote the marker into the live AF3 settings file through its native saver and passed the full device-local self-test.
