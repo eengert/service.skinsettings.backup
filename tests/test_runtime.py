@@ -281,7 +281,7 @@ class RuntimeTests(unittest.TestCase):
         with mock.patch.object(runtime, "live_skin_setting_values", return_value=live):
             result = self.app.backup()
 
-        self.assertIn("Repaired the missing settings.xml", result)
+        self.assertIn("Repaired settings.xml", result)
         self.assertEqual(live, self.app.saved_skin_setting_values(SKIN_ID))
         self.assertEqual(2, self.state_entry()["stats"]["settings"])
 
@@ -303,6 +303,40 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(self.app.persist_skin_settings(SKIN_ID))
 
         execute.assert_not_called()
+
+    def test_persistence_guard_repairs_a_valid_but_stale_document(self):
+        live = [
+            {"id": "current.category", "type": "string", "value": "Movies"},
+            {"id": "current.enabled", "type": "boolean", "value": True},
+        ]
+
+        with mock.patch.object(runtime, "live_skin_setting_values", return_value=live):
+            result = self.app.persist_skin_settings(SKIN_ID)
+
+        self.assertEqual("repaired", result)
+        self.assertEqual(live, self.app.saved_skin_setting_values(SKIN_ID))
+
+    def test_persistence_fallback_uses_latest_stable_live_map(self):
+        first = [{"id": "category", "type": "string", "value": "Old"}]
+        latest = [{"id": "category", "type": "string", "value": "New"}]
+        snapshots = [first, latest] + [latest] * 50
+
+        with mock.patch.object(runtime, "live_skin_setting_values", side_effect=snapshots):
+            result = self.app.persist_skin_settings(SKIN_ID)
+
+        self.assertEqual("repaired", result)
+        self.assertEqual(latest, self.app.saved_skin_setting_values(SKIN_ID))
+
+    def test_persistence_refuses_to_write_while_live_map_keeps_changing(self):
+        original = (ENV.addon_data / SKIN_ID / "settings.xml").read_bytes()
+        snapshots = [[{"id": "changing", "type": "string", "value": str(index)}]
+                     for index in range(50)]
+
+        with mock.patch.object(runtime, "live_skin_setting_values", side_effect=snapshots):
+            with self.assertRaisesRegex(runtime.BackupError, "kept changing"):
+                self.app.persist_skin_settings(SKIN_ID)
+
+        self.assertEqual(original, (ENV.addon_data / SKIN_ID / "settings.xml").read_bytes())
 
     def test_skin_setting_values_decodes_typed_archive_values(self):
         relative = "addon_data/{}/settings.xml".format(SKIN_ID)
@@ -446,6 +480,167 @@ class RuntimeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(runtime.BackupError, "state file is damaged"):
             self.app.incomplete()
+
+    def test_foreign_profile_transaction_does_not_block_operations(self):
+        transaction = Path(self.app.rollback_root) / "foreign" / "transaction.json"
+        transaction.parent.mkdir(parents=True)
+        transaction.write_text(json.dumps({"version": 1, "profile_path": "/another/profile", "status": "applying"}))
+
+        self.assertFalse(self.app.incomplete())
+
+    def test_wrong_json_shapes_are_rejected_without_replacement(self):
+        Path(self.app.state_path).write_text("[]")
+
+        with self.assertRaisesRegex(runtime.BackupError, "state file is damaged"):
+            self.app.state()
+
+        self.assertEqual("[]", Path(self.app.state_path).read_text())
+
+    def test_unknown_pending_schema_is_preserved_and_rejected(self):
+        runtime.atomic_json(self.app.pending_path, {
+            "schema_version": 99,
+            "skin_id": SKIN_ID,
+            "phase": "rebuild",
+            "paths": [],
+        })
+
+        with self.assertRaisesRegex(runtime.BackupError, "pending restore state is invalid"):
+            self.app.pending()
+
+        self.assertEqual(99, json.loads(Path(self.app.pending_path).read_text())["schema_version"])
+
+    def test_ambiguous_recovery_preserves_pending_state(self):
+        runtime.atomic_json(self.app.pending_path, {
+            "skin_id": SKIN_ID,
+            "phase": "restoring",
+            "created_at": "2026-09-06T12:00:00Z",
+            "paths": ["addon_data/{}/settings.xml".format(SKIN_ID)],
+            "started_at": time.time(),
+            "known_transactions": [],
+        })
+        ENV.skin = "skin.estuary"
+
+        with self.assertRaisesRegex(runtime.BackupError, "Pending state was preserved"):
+            self.app.recovery()
+
+        self.assertTrue(Path(self.app.pending_path).exists())
+
+    def test_recovery_clears_pending_after_rolling_back_interrupted_write(self):
+        settings_path = "addon_data/{}/settings.xml".format(SKIN_ID)
+        original = (ENV.profile / settings_path).read_bytes()
+        rollback = Path(runtime.restore_files(
+            ENV.profile, SKIN_ID, {settings_path: _settings(2, "restored")}, self.app.rollback_root))
+        journal_path = rollback / "transaction.json"
+        journal = json.loads(journal_path.read_text())
+        journal["status"] = "applying"
+        journal_path.write_text(json.dumps(journal))
+        runtime.atomic_json(self.app.pending_path, {
+            "skin_id": SKIN_ID,
+            "phase": "restoring",
+            "created_at": "2026-09-06T12:00:00Z",
+            "paths": [settings_path],
+        })
+        ENV.skin = "skin.estuary"
+
+        self.app.recovery()
+
+        self.assertFalse(Path(self.app.pending_path).exists())
+        self.assertEqual(original, (ENV.profile / settings_path).read_bytes())
+
+    def test_cancel_staged_restore_puts_back_and_verifies_previous_files(self):
+        settings_path = "addon_data/{}/settings.xml".format(SKIN_ID)
+        original = (ENV.profile / settings_path).read_bytes()
+        rollback = runtime.restore_files(
+            ENV.profile, SKIN_ID, {settings_path: _settings(2, "restored")}, self.app.rollback_root)
+        runtime.atomic_json(self.app.pending_path, {
+            "skin_id": SKIN_ID,
+            "phase": "rebuild",
+            "created_at": "2026-09-06T12:00:00Z",
+            "paths": [settings_path],
+            "rollback": rollback,
+            "previous_appearance": {"lookandfeel.skincolors": "charcoal"},
+        })
+        ENV.skin = "skin.estuary"
+
+        self.app.cancel_restore()
+
+        self.assertEqual(original, (ENV.profile / settings_path).read_bytes())
+        pending = json.loads(Path(self.app.pending_path).read_text())
+        self.assertEqual("rollback_rebuild", pending["phase"])
+        self.assertEqual("charcoal", pending["appearance"]["lookandfeel.skincolors"])
+        journal = json.loads((Path(rollback) / "transaction.json").read_text())
+        self.assertEqual("rolled_back", journal["status"])
+        pending["appearance"] = {}
+        runtime.atomic_json(self.app.pending_path, pending)
+        ENV.skin = SKIN_ID
+        self.app.finish_restore()
+        self.assertFalse(Path(self.app.pending_path).exists())
+
+    def test_cancel_can_resume_if_pending_update_was_interrupted_after_rollback(self):
+        settings_path = "addon_data/{}/settings.xml".format(SKIN_ID)
+        rollback = runtime.restore_files(
+            ENV.profile, SKIN_ID, {settings_path: _settings(2, "restored")}, self.app.rollback_root)
+        runtime.atomic_json(self.app.pending_path, {
+            "skin_id": SKIN_ID,
+            "phase": "rebuild",
+            "created_at": "2026-09-06T12:00:00Z",
+            "paths": [settings_path],
+            "rollback": rollback,
+        })
+        ENV.skin = "skin.estuary"
+
+        with mock.patch.object(runtime, "atomic_json", side_effect=OSError("power loss")):
+            with self.assertRaises(OSError):
+                self.app.cancel_restore()
+        self.assertEqual("rebuild", json.loads(Path(self.app.pending_path).read_text())["phase"])
+        self.assertEqual("rolled_back", json.loads((Path(rollback) / "transaction.json").read_text())["status"])
+
+        self.app.cancel_restore()
+        self.assertEqual("rollback_rebuild", json.loads(Path(self.app.pending_path).read_text())["phase"])
+
+    def test_af3_rebuild_verifies_generated_xml_around_synchronous_reload(self):
+        ENV.skin = runtime.AF3
+        skin_path = ENV.addon_data / runtime.AF3
+        generated = (
+            "script-skinvariables-includes.xml",
+            "script-skinvariables-labels-includes.xml",
+            "script-skinvariables-images-includes.xml",
+        )
+        for name in generated:
+            path = skin_path / "1080i" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"<includes />")
+
+        calls = []
+        def execute(command, wait=False):
+            calls.append((command, wait))
+            if command.startswith("RunScript("):
+                plan = json.loads((Path(self.app.data) / "rebuild.json").read_text())
+                token = plan["actions"][-1].split(",")[1]
+                _Window.properties["SkinSettingsBackup.RebuildComplete"] = token
+
+        with mock.patch.object(runtime.xbmc, "getInfoLabel", return_value=""), \
+                mock.patch.object(runtime.xbmc, "executebuiltin", side_effect=execute):
+            self.app.rebuild_af3({"skin_id": runtime.AF3})
+
+        self.assertIn(("ReloadSkin()", True), calls)
+
+    def test_af3_rebuild_keeps_pending_work_when_generated_xml_is_missing(self):
+        ENV.skin = runtime.AF3
+        calls = []
+        def execute(command, wait=False):
+            calls.append((command, wait))
+            if command.startswith("RunScript("):
+                plan = json.loads((Path(self.app.data) / "rebuild.json").read_text())
+                token = plan["actions"][-1].split(",")[1]
+                _Window.properties["SkinSettingsBackup.RebuildComplete"] = token
+
+        with mock.patch.object(runtime.xbmc, "getInfoLabel", return_value=""), \
+                mock.patch.object(runtime.xbmc, "executebuiltin", side_effect=execute):
+            with self.assertRaisesRegex(runtime.BackupError, "generation was incomplete"):
+                self.app.rebuild_af3({"skin_id": runtime.AF3})
+
+        self.assertNotIn(("ReloadSkin()", True), calls)
 
     def test_recovery_advances_phase_when_restore_completed_before_pending_update(self):
         old_helper = "addon_data/script.skinvariables/nodes/{}/old.json".format(SKIN_ID)

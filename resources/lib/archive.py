@@ -740,6 +740,49 @@ def restore_files(
     return str(rollback_directory)
 
 
+def rollback_restore(
+    profile_path: os.PathLike | str,
+    rollback_directory: os.PathLike | str,
+    expected_skin_id: str | None = None,
+) -> str:
+    """Roll back one completed restore transaction from its exact snapshot directory."""
+    root = Path(profile_path)
+    _assert_root_directory(root)
+    directory = Path(rollback_directory)
+    _assert_root_directory(directory)
+    journal_path = directory / JOURNAL_NAME
+    if journal_path.is_symlink() or not journal_path.exists():
+        raise BackupError(f"rollback journal is unavailable: {directory}")
+    try:
+        raw = _read_consistent(journal_path)
+        if len(raw) > MAX_MANIFEST_SIZE:
+            raise BackupError("rollback journal is too large")
+        journal = _load_json(raw, "rollback journal")
+    except BackupError as exc:
+        raise BackupError(f"invalid rollback journal: {directory}") from exc
+    if not isinstance(journal, dict) or journal.get("version") != 1:
+        raise BackupError(f"invalid rollback journal: {directory}")
+    if journal.get("profile_path") != os.path.abspath(os.fspath(root)):
+        raise BackupError("rollback journal does not belong to this profile")
+    status = journal.get("status")
+    if status not in ("complete", "rolled_back"):
+        raise BackupError(f"rollback transaction is not complete: {directory}")
+    skin_id = journal.get("skin_id")
+    validate_skin_id(skin_id)
+    if expected_skin_id is not None and skin_id != validate_skin_id(expected_skin_id):
+        raise BackupError("rollback journal belongs to a different skin")
+    try:
+        _restore_snapshot(root, skin_id, directory, journal)
+        _write_journal(directory, journal, "rolled_back")
+    except Exception as exc:
+        try:
+            _write_journal(directory, journal, "rollback_failed")
+        except Exception:
+            pass
+        raise BackupError(f"rollback failed: {directory}") from exc
+    return str(directory)
+
+
 def recover_pending(profile_path: os.PathLike | str, rollback_root: os.PathLike | str) -> list[str]:
     """Recover applying or failed transactions for this exact profile path."""
     root = Path(profile_path)
@@ -760,10 +803,12 @@ def recover_pending(profile_path: os.PathLike | str, rollback_root: os.PathLike 
             journal = _load_json(raw, "rollback journal")
         except BackupError as exc:
             raise BackupError(f"invalid rollback journal: {directory}") from exc
-        if not isinstance(journal, dict) or journal.get("version") != 1:
+        if not isinstance(journal, dict):
             raise BackupError(f"invalid rollback journal: {directory}")
         if journal.get("profile_path") != os.path.abspath(os.fspath(root)):
             continue
+        if journal.get("version") != 1:
+            raise BackupError(f"invalid rollback journal: {directory}")
         status = journal.get("status")
         if status in ("complete", "rolled_back"):
             continue

@@ -291,6 +291,67 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(original, settings.read_bytes())
         self.assertEqual("rolled_back", json.loads(journal_path.read_text())["status"])
 
+    def test_rollback_restore_reverts_one_completed_transaction(self):
+        original = SETTINGS.replace(b"dark", b"original")
+        settings = self.write(f"addon_data/{SKIN_ID}/settings.xml", original)
+        rollback_directory = Path(
+            archive.restore_files(
+                self.profile,
+                SKIN_ID,
+                {f"addon_data/{SKIN_ID}/settings.xml": SETTINGS},
+                self.rollback,
+            )
+        )
+
+        self.assertEqual(str(rollback_directory), archive.rollback_restore(self.profile, rollback_directory))
+        self.assertEqual(original, settings.read_bytes())
+        self.assertEqual("rolled_back", json.loads((rollback_directory / "transaction.json").read_text())["status"])
+        self.assertEqual(str(rollback_directory), archive.rollback_restore(self.profile, rollback_directory))
+        self.assertEqual(original, settings.read_bytes())
+
+    def test_rollback_restore_requires_exact_profile_and_complete_status(self):
+        self.write(f"addon_data/{SKIN_ID}/settings.xml", SETTINGS.replace(b"dark", b"original"))
+        rollback_directory = Path(
+            archive.restore_files(
+                self.profile,
+                SKIN_ID,
+                {f"addon_data/{SKIN_ID}/settings.xml": SETTINGS},
+                self.rollback,
+            )
+        )
+        journal_path = rollback_directory / "transaction.json"
+        journal = json.loads(journal_path.read_text())
+        journal["status"] = "applying"
+        journal_path.write_text(json.dumps(journal))
+        with self.assertRaises(archive.BackupError):
+            archive.rollback_restore(self.profile, rollback_directory)
+
+        journal["status"] = "complete"
+        journal["profile_path"] = str(self.profile)
+        journal_path.write_text(json.dumps(journal))
+        with self.assertRaisesRegex(archive.BackupError, "different skin"):
+            archive.rollback_restore(self.profile, rollback_directory, expected_skin_id="skin.other")
+
+        journal["profile_path"] = str(self.root / "other-profile")
+        journal_path.write_text(json.dumps(journal))
+        with self.assertRaises(archive.BackupError):
+            archive.rollback_restore(self.profile, rollback_directory)
+
+    def test_rollback_restore_marks_failure_when_snapshot_restore_fails(self):
+        self.write(f"addon_data/{SKIN_ID}/settings.xml", SETTINGS.replace(b"dark", b"original"))
+        rollback_directory = Path(
+            archive.restore_files(
+                self.profile,
+                SKIN_ID,
+                {f"addon_data/{SKIN_ID}/settings.xml": SETTINGS},
+                self.rollback,
+            )
+        )
+        with mock.patch.object(archive, "_restore_snapshot", side_effect=OSError("disk full")):
+            with self.assertRaises(archive.BackupError):
+                archive.rollback_restore(self.profile, rollback_directory)
+        self.assertEqual("rollback_failed", json.loads((rollback_directory / "transaction.json").read_text())["status"])
+
 
 if __name__ == "__main__":
     unittest.main()

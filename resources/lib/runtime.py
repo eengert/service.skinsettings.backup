@@ -15,7 +15,7 @@ import xbmcgui
 import xbmcvfs
 
 from resources.lib.archive import (BackupError, build_archive, collect_files, read_archive,
-                                   restore_files, recover_pending, validate_skin_id)
+                                   restore_files, recover_pending, rollback_restore, validate_skin_id)
 from resources.lib.policy import due, fingerprint, reset_reason, statistics
 from resources.lib.storage import Store, join
 
@@ -82,7 +82,10 @@ def read_json(path, default=None):
         return {} if default is None else default
     try:
         with open(path, encoding='utf-8') as handle:
-            return json.load(handle)
+            value = json.load(handle)
+        if not isinstance(value, dict):
+            raise ValueError('expected a JSON object')
+        return value
     except (OSError, ValueError) as exc:
         raise BackupError('A local backup state file is damaged. Existing archives are unchanged.') from exc
 
@@ -152,6 +155,24 @@ def skin_settings_equal(left, right):
             {item['id']: (item['type'], item['value']) for item in right})
 
 
+def checked_skin_setting_values(values, description='pending restore'):
+    """Validate one complete typed setting map before it affects Kodi."""
+    if not isinstance(values, list) or len(values) > 10000:
+        raise BackupError('The {} contains invalid skin settings.'.format(description))
+    checked, seen = [], set()
+    for item in values:
+        if (not isinstance(item, dict) or set(item) != {'id', 'type', 'value'} or
+                not isinstance(item.get('id'), str) or not SKIN_SETTING_ID.fullmatch(item['id']) or
+                item.get('type') not in ('boolean', 'string') or
+                (item['type'] == 'boolean' and not isinstance(item.get('value'), bool)) or
+                (item['type'] == 'string' and not isinstance(item.get('value'), str)) or
+                item['id'] in seen):
+            raise BackupError('The {} contains invalid or duplicate skin settings.'.format(description))
+        seen.add(item['id'])
+        checked.append(item)
+    return checked
+
+
 @contextlib.contextmanager
 def operation_lock(path):
     """OS releases the lock after a crash; never guess an operation's expiry time."""
@@ -197,6 +218,9 @@ class App:
             if not identity:
                 identity = {'device_id': uuid.uuid4().hex}
                 atomic_json(identity_path, identity)
+            elif (set(identity) != {'device_id'} or not isinstance(identity.get('device_id'), str) or
+                  not re.fullmatch(r'[A-Za-z0-9_.-]{8,128}', identity['device_id'])):
+                raise BackupError('The local device identity is invalid. Keep identity.json for recovery and repair it before continuing.')
             self.device_id = identity['device_id']
 
     def pause(self, seconds):
@@ -207,10 +231,61 @@ class App:
 
     def state(self):
         state = read_json(self.state_path)
-        if not state.get('device_id'):
+        if not state:
             state['device_id'] = self.device_id
             state['skins'] = {}
+        elif (not isinstance(state.get('device_id'), str) or
+              not isinstance(state.get('skins'), dict) or
+              any(not isinstance(key, str) or not isinstance(value, dict)
+                  for key, value in state['skins'].items())):
+            raise BackupError('The local backup state is invalid. Existing backups are unchanged; repair state.json before continuing.')
         return state
+
+    def pending(self):
+        pending = read_json(self.pending_path)
+        if not pending:
+            return pending
+        skin = pending.get('skin_id')
+        phase = pending.get('phase')
+        paths = pending.get('paths', [])
+        def unsafe_path(path):
+            return (not isinstance(path, str) or not path or path.startswith(('/', '\\')) or
+                    '..' in path.replace('\\', '/').split('/'))
+        if (pending.get('schema_version') not in (None, 1) or
+                not isinstance(skin, str) or phase not in ('restoring', 'rebuild', 'rollback_rebuild') or
+                not isinstance(paths, list) or len(paths) > 2000 or
+                any(unsafe_path(path) for path in paths)):
+            raise BackupError('The pending restore state is invalid. It was preserved for recovery.')
+        validate_skin_id(skin)
+        if phase == 'rollback_rebuild' and ('skin_settings' not in pending or 'helper_hashes' not in pending):
+            raise BackupError('The previous-settings verification state is incomplete. It was preserved for recovery.')
+        if 'skin_settings' in pending:
+            checked_skin_setting_values(pending['skin_settings'])
+        hashes = pending.get('helper_hashes', {})
+        if (not isinstance(hashes, dict) or any(
+                unsafe_path(path) or not isinstance(digest, str) or
+                not re.fullmatch(r'[0-9a-f]{64}', digest) for path, digest in hashes.items())):
+            raise BackupError('The pending restore verification data is invalid. It was preserved for recovery.')
+        for field in ('appearance', 'previous_appearance'):
+            values = pending.get(field, {})
+            if (not isinstance(values, dict) or any(
+                    not isinstance(key, str) or len(key) > 256 or
+                    not isinstance(value, (str, int, float, bool))
+                    for key, value in values.items())):
+                raise BackupError('The pending restore appearance data is invalid. It was preserved for recovery.')
+        rollback = pending.get('rollback')
+        if rollback is not None:
+            if not isinstance(rollback, str):
+                raise BackupError('The pending restore rollback location is invalid. It was preserved for recovery.')
+            base = os.path.realpath(self.rollback_root)
+            target = os.path.realpath(rollback)
+            try:
+                confined = os.path.commonpath((base, target)) == base and target != base
+            except ValueError:
+                confined = False
+            if not confined:
+                raise BackupError('The pending restore rollback location is outside this add-on. It was preserved for recovery.')
+        return pending
 
     def destination(self):
         value = self.addon.getSetting('destination').strip()
@@ -235,9 +310,18 @@ class App:
             return False
         for name in os.listdir(self.rollback_root):
             path = os.path.join(self.rollback_root, name, 'transaction.json')
-            if os.path.isfile(path) and read_json(path).get('status') in (
-                    'prepared', 'applying', 'rollback_failed'):
-                return True
+            if os.path.isfile(path):
+                journal = read_json(path)
+                if not isinstance(journal.get('profile_path'), str):
+                    raise BackupError('A local rollback journal is invalid. It was preserved for recovery.')
+                if journal.get('profile_path') != self.profile:
+                    continue
+                if (journal.get('version') != 1 or
+                        journal.get('status') not in ('prepared', 'applying', 'rollback_failed',
+                                                      'complete', 'rolled_back')):
+                    raise BackupError('A local rollback journal is invalid. It was preserved for recovery.')
+                if journal.get('status') in ('prepared', 'applying', 'rollback_failed'):
+                    return True
         return False
 
     def appearance(self):
@@ -275,11 +359,12 @@ class App:
             return None
 
     def persist_skin_settings(self, skin, force=False):
-        """Persist the active live map, repairing Kodi's missing document when necessary."""
+        """Keep settings.xml equal to a stable snapshot of Kodi's live setting map."""
         validate_skin_id(skin)
         if skin != xbmc.getSkinDir():
             raise BackupError('The active skin changed before its settings could be saved.')
-        if not force and self.skin_settings_valid(skin):
+        expected = live_skin_setting_values(skin)
+        if not force and skin_settings_equal(self.saved_skin_setting_values(skin), expected):
             return 'existing'
 
         # Create the profile directory before asking Kodi's deferred saver to use it.
@@ -293,18 +378,31 @@ class App:
 
         # Kodi normally saves 500 ms later. Observe the result instead of assuming a fixed
         # delay was enough on a busy tvOS device.
-        expected = live_skin_setting_values(skin)
-        for _attempt in range(20):
+        stable_reads = 0
+        for attempt in range(40):
             self.pause(0.25)
             if skin != xbmc.getSkinDir():
                 raise BackupError('The active skin changed while its settings were being saved.')
-            if skin_settings_equal(self.saved_skin_setting_values(skin), expected):
+            current = live_skin_setting_values(skin)
+            if skin_settings_equal(current, expected):
+                stable_reads += 1
+            else:
+                expected, stable_reads = current, 0
+            if skin_settings_equal(self.saved_skin_setting_values(skin), current):
                 return 'native'
+            # Give Kodi's saver five seconds. Only use the fallback after the live map
+            # stayed unchanged across several reads, so an active edit is never overwritten.
+            if attempt >= 19 and stable_reads >= 3:
+                break
+        else:
+            raise BackupError('Skin settings kept changing. Wait for the skin to become idle and try again.')
 
         # The live JSON map is authoritative. A verified atomic copy both protects the
         # current device and gives Kodi a document to load on its next skin activation.
         atomic_bytes(path, skin_settings_document(expected))
-        if not skin_settings_equal(self.saved_skin_setting_values(skin), expected):
+        if (skin != xbmc.getSkinDir() or
+                not skin_settings_equal(live_skin_setting_values(skin), expected) or
+                not skin_settings_equal(self.saved_skin_setting_values(skin), expected)):
             raise BackupError('Kodi did not persist the skin settings and the recovery write failed.')
         xbmc.log('{}: repaired settings.xml from {} live settings for {}'.format(
             TITLE, len(expected), skin), xbmc.LOGWARNING)
@@ -315,17 +413,7 @@ class App:
         validate_skin_id(skin)
         if skin != xbmc.getSkinDir() or not isinstance(values, list):
             raise BackupError('Kodi is not ready to load the restored skin settings.')
-        checked = []
-        for item in values:
-            if (not isinstance(item, dict) or set(item) != {'id', 'type', 'value'} or
-                    not isinstance(item['id'], str) or not SKIN_SETTING_ID.fullmatch(item['id']) or
-                    item['type'] not in ('boolean', 'string') or
-                    (item['type'] == 'boolean' and not isinstance(item['value'], bool)) or
-                    (item['type'] == 'string' and not isinstance(item['value'], str))):
-                raise BackupError('The pending restore contains invalid skin settings.')
-            checked.append(item)
-        if len({item['id'] for item in checked}) != len(checked):
-            raise BackupError('The pending restore contains duplicate skin settings.')
+        checked = checked_skin_setting_values(values)
 
         # restore_files replaced settings.xml while this skin was inactive, so activating
         # it loaded the complete document as one unit. ReloadSkin is deliberately avoided:
@@ -430,7 +518,7 @@ class App:
                 stats['settings'], len(files), len(blob) / 1024,
                 ' as a protected snapshot' if protected else '')
             if persistence == 'repaired':
-                message += ' Repaired the missing settings.xml from Kodi’s live settings.'
+                message += ' Repaired settings.xml from Kodi’s live settings.'
             return message
 
     def switch_skin(self, skin):
@@ -440,10 +528,18 @@ class App:
         self.pause(0.5)
         if not rpc('Settings.SetSettingValue', setting='lookandfeel.skin', value=skin):
             raise BackupError('Kodi refused to change skins.')
-        # Kodi's confirmation can revert the choice for 10 seconds. Never restore during it.
-        self.pause(12)
-        if xbmc.getSkinDir() != skin:
-            raise BackupError('Skin change was not kept. No restore files have been written in this step.')
+        # Kodi can load slowly, and its confirmation can still revert the choice for
+        # ten seconds. Require the requested skin to remain active past that window.
+        active_reads = 0
+        for _attempt in range(96):
+            self.pause(0.25)
+            if xbmc.getSkinDir() == skin:
+                active_reads += 1
+                if active_reads >= 44:
+                    return
+            else:
+                active_reads = 0
+        raise BackupError('Skin change was not kept. Accept Kodi’s “Keep this skin” prompt and try again.')
 
     def restore_blob(self, blob):
         manifest, files = read_archive(blob)
@@ -470,6 +566,7 @@ class App:
                 raise BackupError('Finish or recover the previous restore first.')
             if xbmc.Player().isPlaying():
                 raise BackupError('Stop playback before restoring.')
+            previous_appearance = self.appearance() if xbmc.getSkinDir() == skin else {}
             if xbmc.getSkinDir() == skin:
                 fallback = 'skin.estuary' if skin != 'skin.estuary' else 'skin.estouchy'
                 try:
@@ -484,10 +581,11 @@ class App:
             if skin == xbmc.getSkinDir():
                 raise BackupError('The target skin became active again; restore stopped before writing.')
             # Remember intent before mutation so a crash never looks like a completed operation.
-            pending = {'skin_id': skin, 'phase': 'restoring', 'created_at': manifest['created_at'],
+            pending = {'schema_version': 1, 'skin_id': skin, 'phase': 'restoring', 'created_at': manifest['created_at'],
                        'paths': list(files), 'started_at': time.time(),
                        'known_transactions': sorted(os.listdir(self.rollback_root)) if os.path.isdir(self.rollback_root) else [],
                        'appearance': manifest.get('appearance', {}),
+                       'previous_appearance': previous_appearance,
                        'skin_settings': restored_settings, 'helper_hashes': helper_files}
             atomic_json(self.pending_path, pending)
             try:
@@ -505,7 +603,7 @@ class App:
             state = self.state()
             state['skins'] = {}
             atomic_json(self.state_path, state)
-        if xbmcgui.Dialog().yesno(TITLE, 'Settings restored. Activate {} now? Accept Kodi’s “Keep this skin” prompt. AF3 will then rebuild its menus.'.format(skin)):
+        if xbmcgui.Dialog().yesno(TITLE, 'Restore files are staged, but activation and verification are still required. Activate {} now? Accept Kodi’s “Keep this skin” prompt.'.format(skin)):
             self.switch_skin(skin)
             self.finish_restore()
 
@@ -520,10 +618,10 @@ class App:
 
     def finish_restore(self):
         with operation_lock(self.lock_path):
-            pending = read_json(self.pending_path)
+            pending = self.pending()
             if not pending:
                 return
-            if pending.get('phase') != 'rebuild' or self.incomplete():
+            if pending.get('phase') not in ('rebuild', 'rollback_rebuild') or self.incomplete():
                 raise BackupError('A restore was interrupted. Choose Recover interrupted restore.')
             skin = pending['skin_id']
             if xbmc.getSkinDir() != skin:
@@ -548,10 +646,10 @@ class App:
             state['skins'] = {}
             atomic_json(self.state_path, state)
             os.unlink(self.pending_path)
-            xbmcgui.Dialog().notification(
-                TITLE, 'Restore complete: {} skin settings; {} helper files.'.format(
-                    len(pending.get('skin_settings', [])), len(pending.get('helper_hashes', {}))),
-                xbmcgui.NOTIFICATION_INFO)
+            message = ('Previous settings restored and verified.' if pending.get('phase') == 'rollback_rebuild'
+                       else 'Restore complete: {} skin settings; {} helper files.'.format(
+                           len(pending.get('skin_settings', [])), len(pending.get('helper_hashes', {}))))
+            xbmcgui.Dialog().notification(TITLE, message, xbmcgui.NOTIFICATION_INFO)
 
     def verify_restored_helpers(self, pending):
         """Do not report success if AF3 or its helper replaced restored source data."""
@@ -584,15 +682,10 @@ class App:
         skin_path = xbmcvfs.translatePath(xbmcaddon.Addon(AF3).getAddonInfo('path'))
         if slug:
             target = os.path.join(skin_path, '1080i', 'script-skinvariables-skinusers.xml')
-            if os.path.islink(target) or os.path.islink(os.path.dirname(target)):
-                raise BackupError('Cannot safely rebuild the skin profile include.')
             root = ET.Element('includes')
             ET.SubElement(root, 'include', {'file': 'script-skinvariables-generator-includes-{}.xml'.format(slug)})
             content = ET.tostring(root, encoding='utf-8', xml_declaration=True)
-            temp = target + '.skinbackup.tmp'
-            with open(temp, 'wb') as handle:
-                handle.write(content)
-            os.replace(temp, target)
+            atomic_bytes(target, content)
         # Run the helper's public script routes in a single invocation, synchronously in its interpreter.
         token = uuid.uuid4().hex
         prop = 'SkinSettingsBackup.RebuildComplete'
@@ -615,17 +708,49 @@ class App:
                 raise BackupError('AF3 rebuild did not finish. Check Kodi’s log and choose Finish restored skin to retry.')
             self.pause(0.25)
         xbmcgui.Window(10000).clearProperty(prop)
-        xbmc.executebuiltin('ReloadSkin()')
+        generated = [os.path.join(skin_path, '1080i', name) for name in (
+            'script-skinvariables-includes.xml',
+            'script-skinvariables-labels-includes.xml',
+            'script-skinvariables-images-includes.xml')]
+        for path in generated:
+            try:
+                if ET.parse(path).getroot().tag != 'includes':
+                    raise ValueError('unexpected root')
+            except (OSError, ET.ParseError, ValueError) as exc:
+                raise BackupError('AF3 menu generation was incomplete. Choose Finish restored skin to retry.') from exc
+        if 'skin_settings' in pending:
+            self.verify_live_skin_settings(AF3, pending['skin_settings'])
+        # AF3 reads the newly generated include files during a reload. The imported live
+        # settings are verified immediately before and again by finish_restore afterward.
+        xbmc.executebuiltin('ReloadSkin()', True)
+        if xbmc.getSkinDir() != AF3:
+            raise BackupError('AF3 did not remain active after its menus were reloaded.')
+        for path in generated:
+            try:
+                if ET.parse(path).getroot().tag != 'includes':
+                    raise ValueError('unexpected root')
+            except (OSError, ET.ParseError, ValueError) as exc:
+                raise BackupError('AF3 generated menu files changed during reload. Choose Finish restored skin to retry.') from exc
 
     def recovery(self):
         with operation_lock(self.lock_path):
-            pending = read_json(self.pending_path)
+            pending = self.pending()
             if pending and xbmc.getSkinDir() == pending.get('skin_id'):
                 raise BackupError('Switch to a different skin before recovering interrupted writes.')
+            if pending and pending.get('phase') in ('rebuild', 'rollback_rebuild'):
+                message = ('Previous files are back in place. Activate the skin and choose Finish restoring previous settings.'
+                           if pending.get('phase') == 'rollback_rebuild' else
+                           'File restoration is complete. Activate the restored skin and choose Finish restored skin, or choose Restore previous settings to cancel it.')
+                xbmcgui.Dialog().ok(TITLE, message)
+                return
             if not xbmcgui.Dialog().yesno(TITLE, 'Undo any interrupted file writes using the saved local rollback copies?'):
                 return
             recovered = recover_pending(self.profile, self.rollback_root)
             if pending and pending.get('phase') == 'restoring':
+                if recovered:
+                    os.unlink(self.pending_path)
+                    xbmcgui.Dialog().ok(TITLE, 'Recovered {} interrupted transaction(s). Previous files are back in place.'.format(len(recovered)))
+                    return
                 completed = []
                 if not recovered and os.path.isdir(self.rollback_root):
                     for name in os.listdir(self.rollback_root):
@@ -645,11 +770,36 @@ class App:
                     atomic_json(self.pending_path, pending)
                     xbmcgui.Dialog().ok(TITLE, 'The files had already finished restoring. Activate the restored skin, then choose Finish restored skin.')
                     return
-                os.unlink(self.pending_path)
-            elif pending and pending.get('phase') == 'rebuild':
-                xbmcgui.Dialog().ok(TITLE, 'File restoration is complete. Activate the restored skin, then choose Finish restored skin.')
-                return
+                raise BackupError('Recovery could not identify the restore transaction. Pending state was preserved; do not make a new backup until the rollback journal is repaired.')
             xbmcgui.Dialog().ok(TITLE, 'Recovered {} interrupted transaction(s).'.format(len(recovered)))
+
+    def cancel_restore(self):
+        """Explicitly restore the exact pre-restore snapshot retained by this transaction."""
+        with operation_lock(self.lock_path):
+            pending = self.pending()
+            if not pending or pending.get('phase') != 'rebuild' or not pending.get('rollback'):
+                raise BackupError('There is no completed staged restore to cancel.')
+            skin = pending['skin_id']
+            if xbmc.getSkinDir() == skin:
+                raise BackupError('Switch to a different skin before restoring the previous settings.')
+            if not xbmcgui.Dialog().yesno(
+                    TITLE, 'Cancel this staged restore and put back the settings and helper files saved immediately before it?'):
+                return
+            rollback_restore(self.profile, pending['rollback'], expected_skin_id=skin)
+            files = collect_files(self.profile, skin)
+            settings = skin_setting_values(files, skin)
+            helper_hashes = {path: hashlib.sha256(data).hexdigest() for path, data in files.items()
+                             if path != 'addon_data/{}/settings.xml'.format(skin)}
+            pending.update({'paths': list(files),
+                            'phase': 'rollback_rebuild',
+                            'skin_settings': settings, 'helper_hashes': helper_hashes,
+                            'appearance': pending.get('previous_appearance', {})})
+            atomic_json(self.pending_path, pending)
+            self.clear_helper_cache(skin, files)
+            state = self.state()
+            state['skins'] = {}
+            atomic_json(self.state_path, state)
+        xbmcgui.Dialog().ok(TITLE, 'Previous files restored. Activate {}, then choose Finish restoring previous settings so menus can be rebuilt and verified.'.format(skin))
 
     def choose_restore(self):
         # Local device's backups are quick to list. Import handles another device or saved ZIP.
@@ -700,34 +850,56 @@ def run_ui(args=None):
             from resources.lib.diagnostics import run
             run(app)
             return
-        options = ['Back up now', 'Save protected snapshot', 'Restore backup', 'Import backup ZIP',
-                   'Choose destination', 'Settings', 'Status and coverage', 'Finish restored skin',
-                   'Recover interrupted restore', 'Run self-test']
-        selected = xbmcgui.Dialog().select(TITLE, options)
-        if selected in (0, 1):
-            xbmcgui.Dialog().ok(TITLE, app.backup(manual=True, protected=selected == 1))
-        elif selected == 2:
+        actions = [('backup', 'Back up now'), ('protect', 'Save protected snapshot'),
+                   ('restore', 'Restore backup'), ('import', 'Import backup ZIP'),
+                   ('destination', 'Choose destination'), ('settings', 'Settings'),
+                   ('status', 'Status and coverage')]
+        pending = app.pending()
+        if pending and pending.get('phase') in ('rebuild', 'rollback_rebuild'):
+            actions.append(('finish', 'Finish restoring previous settings' if pending.get('phase') == 'rollback_rebuild'
+                            else 'Finish restored skin'))
+            if pending.get('phase') == 'rebuild':
+                actions.extend([
+                            ('cancel', 'Restore previous settings (cancel staged restore)')])
+        elif (pending and pending.get('phase') == 'restoring') or app.incomplete():
+            actions.append(('recover', 'Recover interrupted restore'))
+        actions.append(('selftest', 'Run self-test'))
+        selected = xbmcgui.Dialog().select(TITLE, [label for _action, label in actions])
+        if selected < 0:
+            return
+        action = actions[selected][0]
+        if action in ('backup', 'protect'):
+            xbmcgui.Dialog().ok(TITLE, app.backup(manual=True, protected=action == 'protect'))
+        elif action == 'restore':
             app.choose_restore()
-        elif selected == 3:
+        elif action == 'import':
             path = xbmcgui.Dialog().browseSingle(1, 'Choose skin backup ZIP', 'files', '.zip')
             if path:
                 app.restore_blob(Store(xbmcvfs, '', os.path.join(app.data, 'staging')).read(path))
-        elif selected == 4:
+        elif action == 'destination':
             path = xbmcgui.Dialog().browseSingle(0, 'Choose backup folder', 'files', treatAsFolder=True)
             if path:
                 app.addon.setSetting('destination', path)
-        elif selected == 5:
+        elif action == 'settings':
             app.addon.openSettings()
-        elif selected == 6:
+        elif action == 'status':
             app.status()
-        elif selected == 7:
+        elif action == 'finish':
             app.finish_restore()
-        elif selected == 8:
+        elif action == 'cancel':
+            app.cancel_restore()
+        elif action == 'recover':
             app.recovery()
-        elif selected == 9:
+        elif action == 'selftest':
             from resources.lib.diagnostics import run
             result = run(app)
-            xbmcgui.Dialog().textviewer(TITLE, json.dumps(result, indent=2))
+            summary = '{}\n{} of {} checks passed\nKodi {} | Python {}\nElapsed: {} seconds'.format(
+                'Self-test passed' if result.get('success') else 'Self-test failed',
+                len(result.get('tests', [])), len(result.get('tests', [])) if result.get('success') else '?',
+                result.get('kodi', 'Unknown'), result.get('python', 'Unknown'), result.get('elapsed_seconds', 'Unknown'))
+            if result.get('error'):
+                summary += '\n\n' + result['error']
+            xbmcgui.Dialog().textviewer(TITLE, summary)
     except Exception as exc:
         report_error(exc, interactive=True)
 
@@ -753,14 +925,15 @@ def run_service():
             idle = not xbmc.Player().isPlaying() and xbmc.getGlobalIdleTime() >= 15
             if idle and now >= retry_after:
                 if os.path.exists(app.pending_path):
-                    pending = read_json(app.pending_path)
-                    if pending.get('phase') == 'rebuild' and xbmc.getSkinDir() == pending.get('skin_id'):
+                    pending = app.pending()
+                    if (pending.get('phase') in ('rebuild', 'rollback_rebuild') and
+                            xbmc.getSkinDir() == pending.get('skin_id')):
                         app.finish_restore()
                         last_error = ''
                     elif pending.get('phase') == 'restoring':
                         raise BackupError('A restore was interrupted. Open Skin Settings Backup and choose Recover interrupted restore.')
                 else:
-                    if now >= next_guard and not app.skin_settings_valid(xbmc.getSkinDir()):
+                    if now >= next_guard:
                         try:
                             with operation_lock(app.lock_path):
                                 app.persist_skin_settings(xbmc.getSkinDir())

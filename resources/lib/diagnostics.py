@@ -11,7 +11,8 @@ import xml.etree.ElementTree as ET
 import xbmc
 import xbmcvfs
 
-from resources.lib.archive import BackupError, build_archive, collect_files, read_archive, restore_files
+from resources.lib.archive import (BackupError, build_archive, collect_files, read_archive,
+                                   restore_files, rollback_restore)
 from resources.lib.storage import Store
 
 
@@ -71,6 +72,11 @@ def run(app):
                 check(collect_files(profile, skin) == files, 'Restore content mismatch')
                 check(os.path.isfile(os.path.join(rollback, 'transaction.json')), 'Missing restore journal')
                 result['tests'].append('Transactional restore in temporary profile')
+                rollback_restore(profile, rollback, expected_skin_id=skin)
+                rolled_back = collect_files(profile, skin)
+                check(b'Changed' in rolled_back['addon_data/{}/settings.xml'.format(skin)],
+                      'Completed restore rollback did not recover the prior settings')
+                result['tests'].append('Completed restore rollback in temporary profile')
                 os.unlink(path)
                 default_files = collect_files(profile, skin)
                 default_settings = default_files['addon_data/{}/settings.xml'.format(skin)]
