@@ -1,0 +1,39 @@
+{
+  "actual_skin": {
+    "archive_bytes": 8263,
+    "files": 8,
+    "seconds": 0.0167,
+    "skin": "skin.arctic.fuse.3",
+    "source_bytes": 28048
+  },
+  "elapsed_seconds": 4.1058,
+  "kodi": "21.1 (21.1.0) Git:20240817-183eb85f10",
+  "python": "3.11.7",
+  "settings_labels": {
+    "32000": "Skin Settings Backup",
+    "32001": "Backup destination",
+    "32002": "Device label (optional)",
+    "32003": "Enable scheduled backups",
+    "32004": "Check for changes every",
+    "32005": "Automatic backups to keep per skin",
+    "32006": "Notify after scheduled backups",
+    "32011": "Use Choose destination in the add-on menu, or enter a writable local or network folder, such as smb://server/share/KodiBackups. Store passwords in Kodi's network source settings.",
+    "32012": "Runs while Kodi is awake and idle. Missed checks run after Kodi starts again. A destination must be configured first.",
+    "32013": "Only changed configurations create new automatic backups. The first snapshot and manual protected snapshots never expire.",
+    "32020": "Hour",
+    "32021": "6 hours",
+    "32022": "12 hours",
+    "32023": "Day",
+    "32024": "Week"
+  },
+  "success": true,
+  "tests": [
+    "Every settings label, help text and interval choice resolves in Kodi",
+    "Kodi settings schema and defaults",
+    "Archive round trip",
+    "Kodi VFS publish and read-back verification",
+    "Transactional restore in temporary profile",
+    "Read-only backup of current skin",
+    "Native backup orchestration and unchanged-backup skipping"
+  ]
+}

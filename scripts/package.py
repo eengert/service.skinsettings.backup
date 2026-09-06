@@ -13,6 +13,12 @@ def main():
     output = root / 'dist' / '{}-{}.zip'.format(addon_id, version)
     output.parent.mkdir(exist_ok=True)
     files = [root / name for name in ('addon.xml', 'default.py', 'service.py', 'LICENSE.txt', 'README.md')]
+    for asset in metadata.findall('./extension[@point="xbmc.addon.metadata"]/assets/*'):
+        if asset.text:
+            path = root / asset.text
+            if not path.is_file() or not path.resolve().is_relative_to(root):
+                raise SystemExit('Missing or unsafe add-on asset: ' + asset.text)
+            files.append(path)
     files += [path for path in (root / 'resources').rglob('*') if path.is_file()
               and '__pycache__' not in path.parts and not path.name.startswith(('.', '._'))
               and path.suffix not in ('.pyc', '.pyo')]

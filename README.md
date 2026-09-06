@@ -4,7 +4,7 @@ A small Kodi program and background service for versioned skin-setting backups. 
 
 ## Install and use
 
-1. In Kodi, enable installation from unknown sources if needed, then **Add-ons → Install from zip file**, selecting `service.skinsettings.backup-1.0.0.zip`.
+1. In Kodi, enable installation from unknown sources if needed, then **Add-ons → Install from zip file**, selecting `service.skinsettings.backup-1.0.1.zip`.
 2. Open **Program add-ons → Skin Settings Backup → Choose destination**. Pick a writable folder, preferably on a Mac or NAS. You can also type a path such as `smb://server/share/KodiBackups` in Settings. Configure share authentication through Kodi's network sources instead of embedding passwords in the path.
 3. Select **Back up now** to create and verify your initial protected snapshot. Select **Save protected snapshot** before a skin update or after a major customization.
 4. In Settings, select an interval (1, 6, 12, 24 or 168 hours) and how many automatic backups to keep (default 14). Scheduling is enabled once a destination is set. The first snapshot and explicitly protected snapshots never expire.
@@ -12,6 +12,10 @@ A small Kodi program and background service for versioned skin-setting backups. 
 The service waits 45 seconds after startup and works only while Kodi is idle and no media is playing. It catches up after a missed interval when Kodi runs again. It cannot wake a suspended Apple TV or run while Kodi is closed. Unchanged settings do not create additional automatic archives. Failed operations retry after five minutes; repeated identical failures notify at most once a day. Manual backups may run while Kodi is playing; restores require stopped playback.
 
 Each device/profile/skin has its own folder under `SkinSettingsBackup`. The device identifier is generated at first run. If you clone an entire Kodi userdata folder to another device, remove **only this add-on's** `identity.json` and `state.json` on the new device before using it so the clone gets a separate backup identity.
+
+## Settings labels and upgrades
+
+If settings controls appear without labels after a manually copied development installation, fully quit and reopen Kodi. A directory scan alone does not load the add-on language catalog. Normal Kodi installation and updates load it automatically. The built-in self-test now checks every settings label, help text and interval choice.
 
 ## Coverage
 

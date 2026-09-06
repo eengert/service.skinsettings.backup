@@ -42,3 +42,11 @@ The native report is saved in `reports/kodi-self-test.json`. The ZIP is built re
 Version **1.0.0** is packaged in `dist/service.skinsettings.backup-1.0.0.zip` with a SHA-256 sidecar. The same version is installed and enabled in local Kodi. No backup destination has been selected, so scheduled backups will not run until configuration is completed. Nothing was published to a remote repository.
 
 Apple TV validation could not be performed from this environment: no usable device-control tool was available, and the intended backup share has not been selected. Install the ZIP on an Apple TV, choose the share, run the built-in self-test, save a protected snapshot, change a visible setting/widget, restore, and restart Kodi to verify persistence. Actual AF3 skin-switch/rebuild behavior, tvOS filesystem behavior and network-share permissions remain subject to that test.
+
+## Version 1.0.1 — settings labels and thumbnail
+
+The local development installation was registered using UpdateLocalAddons, which scans add-ons but does not load language catalogs. The original English PO was valid. A normal Kodi startup loaded all 15 missing strings; the settings dialog was then captured and visually verified in AF3. Normal install/update also loads the catalog through Kodi’s installer.
+
+The native self-test now checks all settings labels, help text and interval options, in addition to values and backup/restore functionality. All seven native checks pass and the 36 automated tests pass. The language-loading failure was reproduced before the restart.
+
+Added an original AI-generated 512-pixel thumbnail, declared it in metadata, and taught packaging to include declared assets. Runtime settings and backup behavior are unchanged. Updated installation troubleshooting in README.

@@ -6,6 +6,7 @@ import os
 import platform
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 
 import xbmc
 import xbmcvfs
@@ -26,6 +27,20 @@ def run(app):
               'tests': [], 'success': False}
     start = time.monotonic()
     try:
+        settings_path = os.path.join(xbmcvfs.translatePath(app.addon.getAddonInfo('path')), 'resources', 'settings.xml')
+        strings = set()
+        for element in ET.parse(settings_path).getroot().iter():
+            for name in ('label', 'help'):
+                value = element.get(name, '')
+                if value.isdigit():
+                    strings.add(int(value))
+            if element.tag == 'heading' and (element.text or '').isdigit():
+                strings.add(int(element.text))
+        labels = {str(key): app.addon.getLocalizedString(key) for key in sorted(strings)}
+        result['settings_labels'] = labels
+        missing = [key for key, value in labels.items() if not value.strip()]
+        check(not missing, 'Missing settings labels: ' + ', '.join(missing))
+        result['tests'].append('Every settings label, help text and interval choice resolves in Kodi')
         check(app.addon.getSettingInt('interval_hours') in (1, 6, 12, 24, 168), 'Invalid interval setting')
         check(1 <= app.addon.getSettingInt('keep') <= 100, 'Invalid retention setting')
         result['tests'].append('Kodi settings schema and defaults')
