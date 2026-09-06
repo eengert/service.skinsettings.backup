@@ -4,3 +4,4 @@ __pycache__/
 ._*
 dist/
 .pytest_cache/
+reports/*.png
