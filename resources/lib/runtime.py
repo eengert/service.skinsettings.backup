@@ -714,24 +714,47 @@ class App:
             self.pause(0.5)
             if not rpc('Settings.SetSettingValue', setting='lookandfeel.skin', value=skin):
                 raise BackupError('Kodi refused to change skins.')
-            # Kodi can load slowly, and its confirmation can still revert the choice for
-            # ten seconds. Require the requested skin to remain active past that window.
+            # Never put a modal progress window over Kodi's Keep this skin dialog. Once
+            # that dialog closes, restore the modal immediately instead of waiting through
+            # the old fixed eleven-second interval with no useful visual feedback.
             active_reads = 0
+            confirmation_seen = False
+            confirmed_reads = 0
             for _attempt in range(96):
                 self.pause(0.25)
                 if _attempt % 8 == 0:
                     self.progress(self._progress_percent, 'Waiting for Kodi to keep {}'.format(skin))
                 if xbmc.getSkinDir() == skin:
                     active_reads += 1
-                    if active_reads >= 44:
+                    confirmation_active = any(xbmc.getCondVisibility(condition) for condition in (
+                        'Window.IsActive(yesnodialog)', 'Window.IsActive(10100)'))
+                    if confirmation_active:
+                        confirmation_seen = True
+                        confirmed_reads = 0
+                    elif confirmation_seen:
+                        confirmed_reads += 1
+                        if resume_progress and self._progress_background:
+                            self._close_progress()
+                            self._open_progress('Confirming {}'.format(skin))
+                            self.progress(resume_percent, 'Confirming {}'.format(skin))
+                        if confirmed_reads >= 4:
+                            break
+                    elif active_reads >= 44:
+                        # Compatibility fallback for skins/platforms that do not expose
+                        # DialogConfirm through Kodi's visibility conditions.
                         break
                 else:
                     active_reads = 0
+                    confirmed_reads = 0
             else:
                 raise BackupError('Skin change was not kept. Accept Kodi’s “Keep this skin” prompt and try again.')
-        finally:
+        except Exception:
             self._close_progress()
-        if resume_progress:
+            raise
+        if not resume_progress:
+            self._close_progress()
+        elif self._progress is None or self._progress_background:
+            self._close_progress()
             self._open_progress('Continuing after activating {}'.format(skin))
             self.progress(resume_percent, 'Continuing after activating {}'.format(skin))
 

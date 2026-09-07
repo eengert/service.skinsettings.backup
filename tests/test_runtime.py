@@ -392,13 +392,20 @@ class RuntimeTests(unittest.TestCase):
 
     def test_skin_switch_keeps_visible_cues_and_restores_modal_progress(self):
         ENV.skin = "skin.estuary"
+        visibility_calls = []
 
         def change_skin(method, **params):
             self.assertEqual("Settings.SetSettingValue", method)
             ENV.skin = params["value"]
             return True
 
-        with mock.patch.object(runtime, "rpc", side_effect=change_skin):
+        def confirmation_visibility(condition):
+            visibility_calls.append(condition)
+            return len(visibility_calls) == 1
+
+        with mock.patch.object(runtime, "rpc", side_effect=change_skin), \
+                mock.patch.object(runtime.xbmc, "getCondVisibility",
+                                  side_effect=confirmation_visibility):
             with self.app.working("Restoring"):
                 self.app.progress(35, "Before switch")
                 self.app.switch_skin(SKIN_ID)
@@ -409,6 +416,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Accept Kodi", _Dialog.notifications[-1][1])
         self.assertIn(("close",), _DialogProgressBG.instances[-1].events)
         self.assertGreaterEqual(len(_DialogProgress.instances), 2)
+        self.assertLess(len(visibility_calls), 10)
         self.assertIsNone(self.app._progress)
 
     def tearDown(self):
