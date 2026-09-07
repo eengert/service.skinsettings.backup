@@ -1013,7 +1013,7 @@ def run_ui(args=None):
                 result = run(app)
             summary = '{}\n{} of {} checks passed\nKodi {} | Python {}\nElapsed: {} seconds'.format(
                 'Self-test passed' if result.get('success') else 'Self-test failed',
-                len(result.get('tests', [])), len(result.get('tests', [])) if result.get('success') else '?',
+                len(result.get('tests', [])), result.get('total_checks', len(result.get('tests', []))),
                 result.get('kodi', 'Unknown'), result.get('python', 'Unknown'), result.get('elapsed_seconds', 'Unknown'))
             if result.get('error'):
                 summary += '\n\n' + result['error']

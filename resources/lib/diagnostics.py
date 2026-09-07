@@ -23,9 +23,10 @@ def check(condition, message):
 
 
 def run(app):
-    from resources.lib.runtime import PERSISTENCE_MARKER, atomic_json, operation_lock
+    from resources.lib.runtime import (atomic_json, live_skin_setting_values,
+                                       operation_lock, skin_settings_equal)
     result = {'python': platform.python_version(), 'kodi': xbmc.getInfoLabel('System.BuildVersion'),
-              'tests': [], 'success': False}
+              'tests': [], 'total_checks': 11, 'success': False}
     start = time.monotonic()
     try:
         settings_path = os.path.join(xbmcvfs.translatePath(app.addon.getAddonInfo('path')), 'resources', 'settings.xml')
@@ -122,10 +123,11 @@ def run(app):
             check(native_settings, 'Native backup did not capture Kodi live skin settings')
             result['actual_skin']['live_settings'] = len(native_settings)
             result['tests'].append('Kodi live skin settings captured into the archive')
-            persisted = ET.parse(app.skin_settings_path(xbmc.getSkinDir())).getroot()
-            check(any(item.get('id') == PERSISTENCE_MARKER for item in persisted.findall('setting')),
-                  'Kodi did not write the skin settings persistence marker')
-            result['tests'].append('Native skin settings persistence guard')
+            persisted = app.saved_skin_setting_values(xbmc.getSkinDir())
+            live = live_skin_setting_values(xbmc.getSkinDir())
+            check(skin_settings_equal(persisted, live),
+                  'The persisted skin settings do not match Kodi’s live settings')
+            result['tests'].append('Native or verified recovery skin settings persistence')
             check(fixture.backup().startswith('No changes'), 'Unchanged backup was not skipped')
             result['tests'].append('Native backup orchestration and unchanged-backup skipping')
         result['success'] = True
