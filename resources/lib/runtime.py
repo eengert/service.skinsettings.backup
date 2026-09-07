@@ -209,6 +209,7 @@ class App:
         self.state_path = os.path.join(self.data, 'state.json')
         self.lock_path = os.path.join(self.data, 'operation.lock')
         self.rollback_root = os.path.join(self.data, 'rollback')
+        self.abandoned_root = os.path.join(self.data, 'abandoned')
         self.pending_path = os.path.join(self.data, 'pending-restore.json')
         self.monitor = xbmc.Monitor()
         # Identity creation is separate from state updates and serialized even on first launch.
@@ -801,6 +802,35 @@ class App:
             atomic_json(self.state_path, state)
         xbmcgui.Dialog().ok(TITLE, 'Previous files restored. Activate {}, then choose Finish restoring previous settings so menus can be rebuilt and verified.'.format(skin))
 
+    def abandon_restore(self, reason='User abandoned a stuck restore.'):
+        """Unlock the add-on without changing any live skin or helper file."""
+        with operation_lock(self.lock_path):
+            if not os.path.exists(self.pending_path):
+                raise BackupError('There is no pending restore to abandon.')
+            pending = read_json(self.pending_path)
+            os.makedirs(self.abandoned_root, exist_ok=True)
+            name = '{}-{}.json'.format(
+                datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'),
+                uuid.uuid4().hex[:8])
+            atomic_json(os.path.join(self.abandoned_root, name), {
+                'archived_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'reason': reason,
+                'pending': pending,
+            })
+            os.unlink(self.pending_path)
+            return True
+
+    def release_impossible_rollback(self):
+        """Quarantine a rollback that can never match Kodi's non-empty live state."""
+        pending = self.pending()
+        if (not pending or pending.get('phase') != 'rollback_rebuild' or
+                pending.get('skin_settings') != [] or xbmc.getSkinDir() != pending.get('skin_id')):
+            return False
+        if not live_skin_setting_values(pending['skin_id']):
+            return False
+        return self.abandon_restore(
+            'Rollback expected an empty skin configuration but Kodi has live settings; live files were kept unchanged.')
+
     def choose_restore(self):
         # Local device's backups are quick to list. Import handles another device or saved ZIP.
         state = self.state()
@@ -854,15 +884,21 @@ def run_ui(args=None):
                    ('restore', 'Restore backup'), ('import', 'Import backup ZIP'),
                    ('destination', 'Choose destination'), ('settings', 'Settings'),
                    ('status', 'Status and coverage')]
-        pending = app.pending()
+        try:
+            pending = app.pending()
+        except BackupError:
+            pending = None
         if pending and pending.get('phase') in ('rebuild', 'rollback_rebuild'):
             actions.append(('finish', 'Finish restoring previous settings' if pending.get('phase') == 'rollback_rebuild'
                             else 'Finish restored skin'))
             if pending.get('phase') == 'rebuild':
                 actions.extend([
                             ('cancel', 'Restore previous settings (cancel staged restore)')])
+            actions.append(('abandon', 'Abandon stuck restore (keep current skin)'))
         elif (pending and pending.get('phase') == 'restoring') or app.incomplete():
             actions.append(('recover', 'Recover interrupted restore'))
+        if os.path.exists(app.pending_path) and not any(action == 'abandon' for action, _label in actions):
+            actions.append(('abandon', 'Abandon stuck restore (keep current skin)'))
         actions.append(('selftest', 'Run self-test'))
         selected = xbmcgui.Dialog().select(TITLE, [label for _action, label in actions])
         if selected < 0:
@@ -888,6 +924,11 @@ def run_ui(args=None):
             app.finish_restore()
         elif action == 'cancel':
             app.cancel_restore()
+        elif action == 'abandon':
+            if xbmcgui.Dialog().yesno(
+                    TITLE, 'Keep the current skin and helper files exactly as they are, archive the stuck transaction, and allow another restore?'):
+                app.abandon_restore()
+                xbmcgui.Dialog().ok(TITLE, 'The stuck transaction was archived. Current Kodi and skin files were not changed.')
         elif action == 'recover':
             app.recovery()
         elif action == 'selftest':
@@ -926,6 +967,10 @@ def run_service():
             if idle and now >= retry_after:
                 if os.path.exists(app.pending_path):
                     pending = app.pending()
+                    if app.release_impossible_rollback():
+                        xbmc.log('{}: quarantined an impossible empty rollback; live files were unchanged.'.format(TITLE), xbmc.LOGWARNING)
+                        last_error = ''
+                        continue
                     if (pending.get('phase') in ('rebuild', 'rollback_rebuild') and
                             xbmc.getSkinDir() == pending.get('skin_id')):
                         app.finish_restore()

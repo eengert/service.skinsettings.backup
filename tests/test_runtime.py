@@ -598,6 +598,29 @@ class RuntimeTests(unittest.TestCase):
         self.app.cancel_restore()
         self.assertEqual("rollback_rebuild", json.loads(Path(self.app.pending_path).read_text())["phase"])
 
+    def test_abandon_restore_clears_stuck_pending_without_touching_files(self):
+        settings_path = "addon_data/{}/settings.xml".format(SKIN_ID)
+        original = (ENV.profile / settings_path).read_bytes()
+        runtime.atomic_json(
+            self.app.pending_path,
+            {
+                "skin_id": SKIN_ID,
+                "phase": "rollback_rebuild",
+                "created_at": "2026-09-06T12:00:00Z",
+                "paths": [settings_path],
+                "appearance": {},
+            },
+        )
+        ENV.skin = "skin.estuary"
+
+        self.app.abandon_restore()
+
+        self.assertFalse(Path(self.app.pending_path).exists())
+        self.assertEqual(original, (ENV.profile / settings_path).read_bytes())
+        archived = list(Path(self.app.abandoned_root).glob("*.json"))
+        self.assertEqual(1, len(archived))
+        self.assertEqual("rollback_rebuild", json.loads(archived[0].read_text())["pending"]["phase"])
+
     def test_af3_rebuild_verifies_generated_xml_around_synchronous_reload(self):
         ENV.skin = runtime.AF3
         skin_path = ENV.addon_data / runtime.AF3
