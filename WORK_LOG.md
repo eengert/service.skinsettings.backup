@@ -100,3 +100,15 @@ Modal progress is shown throughout ordinary work, with a notification and nonblo
 ## Version 1.0.14 — confirmation-aware progress
 
 Skin switching now watches Kodi's actual DialogConfirm visibility. The nonblocking indicator remains in place while **Keep this skin** owns focus, then modal progress resumes as soon as that dialog closes. This removes the unexplained pause after confirmation and prevents the progress window from opening over Kodi's Yes/No buttons and causing an unintended reversion to Estuary.
+
+## Version 1.0.15 — resilient recovery and clearer workflows
+
+Restore now records its transaction before copying rollback data, so a crash during snapshot creation is recognizable and safely recoverable without changing target files. Recovery also recognizes an automatic rollback that finished before pending metadata was cleared, restages and verifies the recovered settings through Kodi VFS, and releases the pending marker. Unreadable pending metadata can be archived byte-for-byte and cleared without touching Kodi, skin, helper, or add-on configuration files. Symlinked rollback journals are rejected.
+
+Pending restores now show resolution actions first and hide unrelated backup/restore commands. Menu and setting labels use direct terms such as **Back up current skin**, **Choose backup folder**, **Complete pending restore**, and **Keep current files and clear restore status**. Confirmation instructions consistently say to choose **Yes** when Kodi asks whether to keep a skin. The settings category was shortened to **General** for narrow skin layouts. Restore confirmation describes exactly which settings and helper files will be replaced and identifies skin-version differences.
+
+Modal progress cancellation is honored while preserving completed backups and pending recovery data. Skin-confirmation progress remains nonblocking until Kodi's Yes/No dialog closes, and a reverted skin activation fails rather than being treated as success. Command-line system checks now display their result, and package verification uses explicit checks that remain active under optimized Python.
+
+All 82 automated tests pass, including Skin Variables build-hash changes, simulated crashes during rollback snapshot creation, already-completed automatic rollback recovery, malformed pending-state escape, symlink rejection, cancellation, delayed skin confirmation, skin reversion, and clean/pending menu states. Python compilation and Git whitespace checks pass.
+
+Native validation used the exact 1.0.15 ZIP on Kodi 21.1 with Python 3.11.7. The system check passed 11 of 11 checks; manual backup saved 276 user skin settings and eight managed files; restore staged through Estuary with visible progress, retained a pending transaction across rejected skin confirmations, rebuilt AF3 with visible progress, verified all restored settings and seven helper files, and cleared the pending marker. The test discovered and fixed four Skin Variables build fingerprints that must change during regeneration and are now excluded from user-setting backup and verification.

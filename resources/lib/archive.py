@@ -245,13 +245,6 @@ def _enumerate_managed(root: Path, skin_id: str, skin_user_slugs: Iterable[str] 
     return tuple(sorted(found))
 
 
-def managed_paths(profile_path: os.PathLike | str, skin_id: str) -> Tuple[str, ...]:
-    """Return existing files in the narrowly managed scope for a skin."""
-    validate_skin_id(skin_id)
-    root = Path(profile_path)
-    return _enumerate_managed(root, skin_id, _current_skin_user_slugs(root, skin_id))
-
-
 def _read_once(path: Path) -> Tuple[bytes, Tuple[int, int, int, int, int]]:
     try:
         before = path.lstat()
@@ -703,20 +696,31 @@ def restore_files(
         rollback_directory = Path(tempfile.mkdtemp(prefix=f"{skin_id}-", dir=rollback_base))
     except OSError as exc:
         raise BackupError("cannot create rollback directory") from exc
-    previous_entries = []
-    for relative, data in sorted(existing.items()):
-        snapshot_relative = f"{_ROLLBACK_FILES}/{relative}"
-        _atomic_write_impl(rollback_directory, snapshot_relative, data)
-        previous_entries.append({"path": relative, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
     journal: Dict[str, object] = {
         "version": 1,
         "transaction_id": str(uuid.uuid4()),
         "profile_path": os.path.abspath(os.fspath(root)),
         "skin_id": skin_id,
         "skin_user_slugs": list(transaction_slugs),
-        "previous_entries": previous_entries,
+        "previous_entries": [],
         "target_paths": sorted(checked),
     }
+    # Record intent before copying the rollback snapshot. A crash here cannot have
+    # changed target files, so recovery can safely close a snapshotting transaction.
+    _write_journal(rollback_directory, journal, "snapshotting")
+    previous_entries = []
+    try:
+        for relative, data in sorted(existing.items()):
+            snapshot_relative = f"{_ROLLBACK_FILES}/{relative}"
+            _atomic_write_impl(rollback_directory, snapshot_relative, data)
+            previous_entries.append({"path": relative, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    except Exception as exc:
+        try:
+            _write_journal(rollback_directory, journal, "rolled_back")
+        except Exception:
+            pass
+        raise BackupError("could not save the rollback snapshot; target files were unchanged") from exc
+    journal["previous_entries"] = previous_entries
     _write_journal(rollback_directory, journal, "prepared")
     try:
         _write_journal(rollback_directory, journal, "applying")
@@ -812,10 +816,14 @@ def recover_pending(profile_path: os.PathLike | str, rollback_root: os.PathLike 
         status = journal.get("status")
         if status in ("complete", "rolled_back"):
             continue
-        if status not in ("prepared", "applying", "rollback_failed"):
+        if status not in ("snapshotting", "prepared", "applying", "rollback_failed"):
             raise BackupError(f"invalid rollback status: {directory}")
         skin_id = journal.get("skin_id")
         validate_skin_id(skin_id)
+        if status == "snapshotting":
+            _write_journal(directory, journal, "rolled_back")
+            recovered.append(str(directory))
+            continue
         try:
             _restore_snapshot(root, skin_id, directory, journal)
             _write_journal(directory, journal, "rolled_back")

@@ -258,6 +258,32 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(1, len(journals))
         self.assertEqual("rolled_back", json.loads(journals[0].read_text())["status"])
 
+    def test_crash_while_copying_snapshot_leaves_targets_unchanged_and_recoverable(self):
+        settings_path = self.write(
+            f"addon_data/{SKIN_ID}/settings.xml", SETTINGS.replace(b"dark", b"original"))
+        real_write = archive._atomic_write_impl
+
+        def crash_on_snapshot(root, relative, data):
+            if relative.startswith("files/"):
+                raise KeyboardInterrupt("simulated process crash")
+            return real_write(root, relative, data)
+
+        with mock.patch.object(archive, "_atomic_write_impl", side_effect=crash_on_snapshot):
+            with self.assertRaises(KeyboardInterrupt):
+                archive.restore_files(
+                    self.profile, SKIN_ID,
+                    {f"addon_data/{SKIN_ID}/settings.xml": SETTINGS}, self.rollback)
+
+        self.assertEqual(SETTINGS.replace(b"dark", b"original"), settings_path.read_bytes())
+        journal_path = next(self.rollback.glob("*/transaction.json"))
+        self.assertEqual("snapshotting", json.loads(journal_path.read_text())["status"])
+
+        recovered = archive.recover_pending(self.profile, self.rollback)
+
+        self.assertEqual([str(journal_path.parent)], recovered)
+        self.assertEqual(SETTINGS.replace(b"dark", b"original"), settings_path.read_bytes())
+        self.assertEqual("rolled_back", json.loads(journal_path.read_text())["status"])
+
     def test_symlink_file_and_parent_are_rejected(self):
         outside = self.root / "outside.xml"
         outside.write_bytes(SETTINGS)

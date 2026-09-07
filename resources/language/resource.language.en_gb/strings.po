@@ -6,19 +6,19 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 
 msgctxt "#32000"
-msgid "Skin Settings Backup"
+msgid "General"
 msgstr ""
 
 msgctxt "#32001"
-msgid "Backup destination"
+msgid "Backup folder"
 msgstr ""
 
 msgctxt "#32002"
-msgid "Device label (optional)"
+msgid "Backup device name (optional)"
 msgstr ""
 
 msgctxt "#32003"
-msgid "Enable scheduled backups"
+msgid "Enable automatic backups"
 msgstr ""
 
 msgctxt "#32004"
@@ -30,7 +30,7 @@ msgid "Automatic backups to keep per skin"
 msgstr ""
 
 msgctxt "#32006"
-msgid "Notify after scheduled backups"
+msgid "Notify after automatic backups"
 msgstr ""
 
 msgctxt "#32011"
@@ -42,11 +42,11 @@ msgid "Runs while Kodi is awake and idle. Missed checks run after Kodi starts ag
 msgstr ""
 
 msgctxt "#32013"
-msgid "Only changed configurations create new automatic backups. The first snapshot and manual protected snapshots never expire."
+msgid "Only changed configurations create new automatic backups. The first backup and protected backups are never removed automatically."
 msgstr ""
 
 msgctxt "#32020"
-msgid "Hour"
+msgid "1 hour"
 msgstr ""
 
 msgctxt "#32021"
@@ -58,9 +58,9 @@ msgid "12 hours"
 msgstr ""
 
 msgctxt "#32023"
-msgid "Day"
+msgid "1 day"
 msgstr ""
 
 msgctxt "#32024"
-msgid "Week"
+msgid "1 week"
 msgstr ""

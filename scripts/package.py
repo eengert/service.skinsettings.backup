@@ -29,8 +29,11 @@ def main():
             info.external_attr = 0o100644 << 16
             archive.writestr(info, path.read_bytes())
     with zipfile.ZipFile(output) as archive:
-        assert archive.testzip() is None
-        assert all(name.startswith(addon_id + '/') for name in archive.namelist())
+        damaged = archive.testzip()
+        if damaged is not None:
+            raise SystemExit('Package verification failed for: ' + damaged)
+        if not all(name.startswith(addon_id + '/') for name in archive.namelist()):
+            raise SystemExit('Package contains a file outside the add-on directory')
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     output.with_suffix('.zip.sha256').write_text('{}  {}\n'.format(digest, output.name))
     print('{} ({} bytes)\nSHA256 {}'.format(output, output.stat().st_size, digest))

@@ -56,6 +56,7 @@ class _Dialog:
 
 class _DialogProgress:
     instances = []
+    cancelled = False
 
     def __init__(self):
         self.events = []
@@ -69,6 +70,9 @@ class _DialogProgress:
 
     def close(self):
         self.events.append(("close",))
+
+    def iscanceled(self):
+        return self.__class__.cancelled
 
 
 class _DialogProgressBG(_DialogProgress):
@@ -239,6 +243,7 @@ class RuntimeTests(unittest.TestCase):
         _Window.properties = {}
         _Dialog.notifications = []
         _DialogProgress.instances = []
+        _DialogProgress.cancelled = False
         _DialogProgressBG.instances = []
         ENV.profile.mkdir()
         self.write_settings(3, "initial")
@@ -256,6 +261,15 @@ class RuntimeTests(unittest.TestCase):
              ("close",)],
             _DialogProgress.instances[-1].events,
         )
+        self.assertIsNone(self.app._progress)
+
+    def test_progress_cancel_is_honored_and_closes_dialog(self):
+        with self.app.working("Starting"):
+            _DialogProgress.cancelled = True
+            with self.assertRaisesRegex(runtime.BackupError, "Operation cancelled"):
+                self.app.progress(40, "Working")
+
+        self.assertIn(("close",), _DialogProgress.instances[-1].events)
         self.assertIsNone(self.app._progress)
 
     def test_vfs_stages_and_verifies_skin_settings_only_while_skin_is_inactive(self):
@@ -392,20 +406,16 @@ class RuntimeTests(unittest.TestCase):
 
     def test_skin_switch_keeps_visible_cues_and_restores_modal_progress(self):
         ENV.skin = "skin.estuary"
-        visibility_calls = []
+        confirmations = iter([False, True, True, True, False, False, False, False])
 
         def change_skin(method, **params):
             self.assertEqual("Settings.SetSettingValue", method)
             ENV.skin = params["value"]
             return True
 
-        def confirmation_visibility(condition):
-            visibility_calls.append(condition)
-            return len(visibility_calls) == 1
-
         with mock.patch.object(runtime, "rpc", side_effect=change_skin), \
-                mock.patch.object(runtime.xbmc, "getCondVisibility",
-                                  side_effect=confirmation_visibility):
+                mock.patch.object(self.app, "skin_confirmation_active",
+                                  side_effect=lambda: next(confirmations)):
             with self.app.working("Restoring"):
                 self.app.progress(35, "Before switch")
                 self.app.switch_skin(SKIN_ID)
@@ -413,10 +423,30 @@ class RuntimeTests(unittest.TestCase):
                 self.assertFalse(self.app._progress_background)
 
         self.assertTrue(_Dialog.notifications)
-        self.assertIn("Accept Kodi", _Dialog.notifications[-1][1])
+        self.assertIn("choose Yes", _Dialog.notifications[-1][1])
         self.assertIn(("close",), _DialogProgressBG.instances[-1].events)
         self.assertGreaterEqual(len(_DialogProgress.instances), 2)
-        self.assertLess(len(visibility_calls), 10)
+        self.assertIsNone(self.app._progress)
+
+    def test_skin_switch_rejects_target_that_reverts_after_confirmation(self):
+        ENV.skin = "skin.estuary"
+        reads = {"count": 0}
+
+        def get_skin():
+            reads["count"] += 1
+            if reads["count"] == 1:
+                return "skin.estuary"
+            if reads["count"] <= 5:
+                return SKIN_ID
+            return "skin.estuary"
+
+        with mock.patch.object(runtime, "rpc", return_value=True), \
+                mock.patch.object(runtime.xbmc, "getSkinDir", side_effect=get_skin), \
+                mock.patch.object(self.app, "skin_confirmation_active", side_effect=[True, True, False, False]):
+            with self.app.working("Restoring"):
+                with self.assertRaisesRegex(runtime.BackupError, "Skin change was not kept"):
+                    self.app.switch_skin(SKIN_ID)
+
         self.assertIsNone(self.app._progress)
 
     def tearDown(self):
@@ -556,6 +586,26 @@ class RuntimeTests(unittest.TestCase):
             runtime.skin_setting_values(files, SKIN_ID),
         )
 
+    def test_skinvariables_build_hashes_are_not_restored_as_user_settings(self):
+        relative = "addon_data/{}/settings.xml".format(SKIN_ID)
+        files = {relative: (
+            b'<settings><setting id="user.setting" type="string">Family</setting>'
+            b'<setting id="script-skinvariables-generator-hash" type="string">old</setting>'
+            b'<setting id="script-skinvariables-images-hash" type="string">old</setting></settings>')}
+        values = [
+            {"id": "user.setting", "type": "string", "value": "Family"},
+            {"id": "script-skinvariables-generator-hash", "type": "string", "value": "old"},
+        ]
+
+        self.assertEqual(
+            [{"id": "user.setting", "type": "string", "value": "Family"}],
+            runtime.skin_setting_values(files, SKIN_ID),
+        )
+        self.assertEqual(
+            [{"id": "user.setting", "type": "string", "value": "Family"}],
+            runtime.checked_skin_setting_values(values),
+        )
+
     def test_restore_loads_complete_document_without_reset_or_per_setting_rpc(self):
         values = [
             {"id": "source.string", "type": "string", "value": "Family"},
@@ -686,6 +736,16 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(runtime.BackupError, "state file is damaged"):
             self.app.incomplete()
 
+    def test_symlinked_transaction_directory_is_rejected(self):
+        outside = self.root / "outside-rollback"
+        outside.mkdir()
+        (outside / "transaction.json").write_text("{}")
+        Path(self.app.rollback_root).mkdir(parents=True, exist_ok=True)
+        (Path(self.app.rollback_root) / "unsafe").symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(runtime.BackupError, "symbolic link"):
+            self.app.incomplete()
+
     def test_foreign_profile_transaction_does_not_block_operations(self):
         transaction = Path(self.app.rollback_root) / "foreign" / "transaction.json"
         transaction.parent.mkdir(parents=True)
@@ -751,6 +811,88 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertFalse(Path(self.app.pending_path).exists())
         self.assertEqual(original, (ENV.profile / settings_path).read_bytes())
+
+    def test_recovery_clears_pending_when_automatic_rollback_already_finished(self):
+        settings_path = "addon_data/{}/settings.xml".format(SKIN_ID)
+        original = (ENV.profile / settings_path).read_bytes()
+        rollback = Path(runtime.restore_files(
+            ENV.profile, SKIN_ID, {settings_path: _settings(2, "restored")}, self.app.rollback_root))
+        runtime.rollback_restore(ENV.profile, rollback, expected_skin_id=SKIN_ID)
+        runtime.atomic_json(self.app.pending_path, {
+            "skin_id": SKIN_ID,
+            "phase": "restoring",
+            "created_at": "2026-09-06T12:00:00Z",
+            "started_at": 0,
+            "known_transactions": [],
+            "paths": [settings_path],
+        })
+        ENV.skin = "skin.estuary"
+
+        self.app.recovery()
+
+        self.assertFalse(Path(self.app.pending_path).exists())
+        self.assertEqual(original, (ENV.profile / settings_path).read_bytes())
+
+    def test_abandon_malformed_pending_preserves_exact_bytes_and_current_files(self):
+        settings_path = ENV.addon_data / SKIN_ID / "settings.xml"
+        original = settings_path.read_bytes()
+        malformed = b"{not-json\x00preserve-me"
+        Path(self.app.pending_path).write_bytes(malformed)
+
+        self.app.abandon_restore()
+
+        self.assertFalse(Path(self.app.pending_path).exists())
+        archived = list(Path(self.app.abandoned_root).glob("*-pending-restore.invalid"))
+        self.assertEqual(1, len(archived))
+        self.assertEqual(malformed, archived[0].read_bytes())
+        self.assertEqual(original, settings_path.read_bytes())
+
+    def test_clean_menu_uses_user_facing_labels(self):
+        dialog = mock.Mock()
+        dialog.select.return_value = -1
+
+        with mock.patch.object(runtime, "App", return_value=self.app), \
+                mock.patch.object(runtime.xbmcgui, "Dialog", return_value=dialog):
+            runtime.run_ui()
+
+        labels = dialog.select.call_args.args[1]
+        self.assertEqual("Back up current skin", labels[0])
+        self.assertIn("Choose backup folder", labels)
+        self.assertIn("Help and backup status", labels)
+
+    def test_pending_menu_prioritizes_resolution_and_hides_new_operations(self):
+        runtime.atomic_json(self.app.pending_path, {
+            "schema_version": 1,
+            "skin_id": SKIN_ID,
+            "phase": "rebuild",
+            "paths": [],
+        })
+        dialog = mock.Mock()
+        dialog.select.return_value = -1
+
+        with mock.patch.object(runtime, "App", return_value=self.app), \
+                mock.patch.object(runtime.xbmcgui, "Dialog", return_value=dialog):
+            runtime.run_ui()
+
+        labels = dialog.select.call_args.args[1]
+        self.assertEqual("Complete pending restore", labels[0])
+        self.assertIn("Keep current files and clear restore status", labels)
+        self.assertNotIn("Back up current skin", labels)
+        self.assertNotIn("Restore a saved backup", labels)
+
+    def test_malformed_pending_menu_remains_clearable(self):
+        Path(self.app.pending_path).write_text("{not-json")
+        dialog = mock.Mock()
+        dialog.select.return_value = -1
+
+        with mock.patch.object(runtime, "App", return_value=self.app), \
+                mock.patch.object(runtime.xbmcgui, "Dialog", return_value=dialog), \
+                mock.patch.object(self.app, "incomplete",
+                                  side_effect=AssertionError("must not inspect rollback first")):
+            runtime.run_ui()
+
+        labels = dialog.select.call_args.args[1]
+        self.assertEqual("Clear unreadable restore status (keep current files)", labels[0])
 
     def test_cancel_staged_restore_puts_back_and_verifies_previous_files(self):
         settings_path = "addon_data/{}/settings.xml".format(SKIN_ID)
