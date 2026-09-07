@@ -309,7 +309,7 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(self.app, "restage_and_reactivate") as restage, \
                 mock.patch.object(self.app, "verify_live_skin_settings"), \
                 mock.patch.object(self.app, "verify_restored_helpers"):
-            self.app.finish_restore()
+            self.app.finish_restore(allow_restage=True)
 
         self.assertEqual(2, load.call_count)
         restage.assert_called_once()
@@ -332,7 +332,7 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(self.app, "restage_and_reactivate",
                                   side_effect=runtime.BackupError("VFS failed")):
             with self.assertRaisesRegex(runtime.BackupError, "VFS failed"):
-                self.app.finish_restore()
+                self.app.finish_restore(allow_restage=True)
 
         self.assertTrue(Path(self.app.pending_path).exists())
 
@@ -348,13 +348,31 @@ class RuntimeTests(unittest.TestCase):
         })
 
         with mock.patch.object(self.app, "load_restored_skin_settings",
-                               side_effect=runtime.BackupError("document changed")), \
+                               side_effect=runtime.RestoredSettingsDocumentChanged("document changed")), \
+                mock.patch.object(self.app, "confirm", return_value=False), \
                 mock.patch.object(self.app, "restage_and_reactivate") as restage:
-            with self.assertRaisesRegex(runtime.BackupError, "document changed"):
-                self.app.finish_restore()
+            with self.assertRaisesRegex(runtime.BackupError, "remains pending"):
+                self.app.finish_restore(allow_restage=True)
 
         restage.assert_not_called()
         self.assertTrue(Path(self.app.pending_path).exists())
+
+    def test_background_finish_never_switches_skins_for_stale_live_settings(self):
+        runtime.atomic_json(self.app.pending_path, {
+            "schema_version": 1,
+            "skin_id": SKIN_ID,
+            "phase": "rebuild",
+            "created_at": "2026-09-07T12:00:00Z",
+            "paths": [],
+            "skin_settings": [],
+            "helper_hashes": {},
+        })
+        with mock.patch.object(self.app, "load_restored_skin_settings",
+                               side_effect=runtime.RestoredSettingsNotLoaded("stale")), \
+                mock.patch.object(self.app, "restage_and_reactivate") as restage:
+            with self.assertRaisesRegex(runtime.BackupError, "Open Skin Settings Backup"):
+                self.app.finish_restore()
+        restage.assert_not_called()
 
     def test_addon_declares_executable_before_background_service(self):
         import xml.etree.ElementTree as ET

@@ -32,6 +32,10 @@ class RestoredSettingsNotLoaded(BackupError):
     """The verified document is intact, but Kodi activated a stale live map."""
 
 
+class RestoredSettingsDocumentChanged(BackupError):
+    """The pending values are valid, but the staged on-disk document was replaced."""
+
+
 def rpc(method, **params):
     answer = json.loads(xbmc.executeJSONRPC(json.dumps(
         {'jsonrpc': '2.0', 'method': method, 'params': params, 'id': 1})))
@@ -285,6 +289,18 @@ class App:
         if resume:
             self._open_progress('Continuing restore')
             self.progress(percent, 'Continuing restore')
+
+    def confirm(self, message):
+        """Ask a consequential restore question without stacking modal windows."""
+        resume = self._progress is not None
+        percent = self._progress_percent
+        if resume:
+            self._close_progress()
+        accepted = xbmcgui.Dialog().yesno(TITLE, message)
+        if resume:
+            self._open_progress('Continuing restore')
+            self.progress(percent, 'Continuing restore')
+        return accepted
 
     def _close_progress(self):
         dialog, self._progress = self._progress, None
@@ -570,7 +586,8 @@ class App:
         # it loaded the complete document as one unit. ReloadSkin is deliberately avoided:
         # Kodi saves its current live state before reloading and could overwrite this file.
         if not skin_settings_equal(self.saved_skin_setting_values(skin), checked):
-            raise BackupError('The restored skin settings document changed before Kodi could load it.')
+            raise RestoredSettingsDocumentChanged(
+                'The restored skin settings document changed before Kodi could load it.')
         last_error = None
         for _attempt in range(20):
             if skin != xbmc.getSkinDir():
@@ -798,7 +815,7 @@ class App:
         with self.working('Activating the restored skin'):
             self.progress(5, 'Activating {}'.format(skin))
             self.switch_skin(skin)
-            self.finish_restore()
+            self.finish_restore(allow_restage=True)
 
     def clear_helper_cache(self, skin, files):
         win = xbmcgui.Window(10000)
@@ -809,7 +826,7 @@ class App:
                 win.clearProperty('SkinVariables.ShortcutsNode.{}-{}'.format(directory, filename))
         win.setProperty('SkinVariables.ShortcutsNode.Reload', str(time.time()))
 
-    def finish_restore(self):
+    def finish_restore(self, allow_restage=False):
         with operation_lock(self.lock_path):
             self.progress(10, 'Checking the staged restore')
             pending = self.pending()
@@ -824,7 +841,16 @@ class App:
                 self.progress(25, 'Loading restored skin settings')
                 try:
                     self.load_restored_skin_settings(skin, pending['skin_settings'])
-                except RestoredSettingsNotLoaded:
+                except (RestoredSettingsNotLoaded, RestoredSettingsDocumentChanged) as exc:
+                    if not allow_restage:
+                        raise BackupError(
+                            'Kodi has not loaded the complete pending restore. Open Skin Settings Backup '
+                            'and choose Finish restored skin to continue safely.') from exc
+                    if (isinstance(exc, RestoredSettingsDocumentChanged) and not self.confirm(
+                            'Kodi replaced the staged settings document after activation. Restage the '
+                            'verified pending backup and try the skin activation again?')):
+                        raise BackupError(
+                            'Restore remains pending. Choose Finish restored skin when ready.') from exc
                     self.restage_and_reactivate(pending)
                     self.load_restored_skin_settings(skin, pending['skin_settings'])
             self.progress(40, 'Refreshing restored helper data')
@@ -1181,7 +1207,7 @@ def run_ui(args=None):
             app.status()
         elif action == 'finish':
             with app.working('Finishing and verifying the restore'):
-                app.finish_restore()
+                app.finish_restore(allow_restage=True)
         elif action == 'cancel':
             app.cancel_restore()
         elif action == 'abandon':
