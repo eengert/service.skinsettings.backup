@@ -41,6 +41,8 @@ class _Player:
 
 
 class _Dialog:
+    notifications = []
+
     def yesno(self, _title, _message):
         return True
 
@@ -48,10 +50,11 @@ class _Dialog:
         return None
 
     def notification(self, *_args):
+        self.notifications.append(_args)
         return None
 
 
-class _DialogProgressBG:
+class _DialogProgress:
     instances = []
 
     def __init__(self):
@@ -61,11 +64,16 @@ class _DialogProgressBG:
     def create(self, heading, message=""):
         self.events.append(("create", heading, message))
 
-    def update(self, percent, heading="", message=""):
-        self.events.append(("update", percent, heading, message))
+    def update(self, percent, message=""):
+        self.events.append(("update", percent, message))
 
     def close(self):
         self.events.append(("close",))
+
+
+class _DialogProgressBG(_DialogProgress):
+    def update(self, percent, heading="", message=""):
+        self.events.append(("update", percent, heading, message))
 
 
 class _Window:
@@ -109,7 +117,7 @@ class _Addon:
 
 class _VFSFile:
     def __init__(self, path, mode=None):
-        self.path = Path(path)
+        self.path = Path(_translate_path(path))
         self.mode = mode
         self.handle = None
         if mode == "w":
@@ -158,6 +166,7 @@ xbmcgui = types.ModuleType("xbmcgui")
 xbmcgui.NOTIFICATION_INFO = "info"
 xbmcgui.NOTIFICATION_WARNING = "warning"
 xbmcgui.Dialog = _Dialog
+xbmcgui.DialogProgress = _DialogProgress
 xbmcgui.DialogProgressBG = _DialogProgressBG
 xbmcgui.Window = _Window
 
@@ -167,8 +176,8 @@ xbmcaddon.Addon = _Addon
 xbmcvfs = types.ModuleType("xbmcvfs")
 xbmcvfs.translatePath = _translate_path
 xbmcvfs.File = _VFSFile
-xbmcvfs.exists = lambda path: Path(path).exists()
-xbmcvfs.mkdirs = lambda path: (Path(path).mkdir(parents=True, exist_ok=True) or True)
+xbmcvfs.exists = lambda path: Path(_translate_path(path)).exists()
+xbmcvfs.mkdirs = lambda path: (Path(_translate_path(path)).mkdir(parents=True, exist_ok=True) or True)
 xbmcvfs.listdir = lambda path: (
     [item.name for item in Path(path).iterdir() if item.is_dir()],
     [item.name for item in Path(path).iterdir() if item.is_file()],
@@ -228,6 +237,8 @@ class RuntimeTests(unittest.TestCase):
         }
         ENV.fail_record_write = False
         _Window.properties = {}
+        _Dialog.notifications = []
+        _DialogProgress.instances = []
         _DialogProgressBG.instances = []
         ENV.profile.mkdir()
         self.write_settings(3, "initial")
@@ -241,18 +252,145 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             [("create", runtime.TITLE, "Starting"),
-             ("update", 40, runtime.TITLE, "Working"),
+             ("update", 40, "Working"),
              ("close",)],
-            _DialogProgressBG.instances[-1].events,
+            _DialogProgress.instances[-1].events,
         )
         self.assertIsNone(self.app._progress)
 
+    def test_vfs_stages_and_verifies_skin_settings_only_while_skin_is_inactive(self):
+        values = [{"id": "family.setting", "type": "string", "value": "restored"}]
+        ENV.skin = "skin.estuary"
+
+        self.app.write_skin_settings_vfs(SKIN_ID, values)
+
+        self.assertTrue(runtime.skin_settings_equal(
+            self.app.saved_skin_setting_values(SKIN_ID), values))
+        ENV.skin = SKIN_ID
+        with self.assertRaisesRegex(runtime.BackupError, "must be inactive"):
+            self.app.write_skin_settings_vfs(SKIN_ID, values)
+
+    def test_failed_vfs_stage_restores_the_previous_document(self):
+        values = [{"id": "family.setting", "type": "string", "value": "restored"}]
+        path = ENV.addon_data / SKIN_ID / "settings.xml"
+        previous = path.read_bytes()
+        ENV.skin = "skin.estuary"
+        original_write = self.app._write_vfs_bytes
+        calls = []
+
+        def fail_after_truncating(vfs_path, data):
+            calls.append(vfs_path)
+            if len(calls) == 1:
+                Path(_translate_path(vfs_path)).write_bytes(b"partial")
+                raise OSError("write failed")
+            return original_write(vfs_path, data)
+
+        with mock.patch.object(self.app, "_write_vfs_bytes", side_effect=fail_after_truncating):
+            with self.assertRaisesRegex(runtime.BackupError, "stage and verify"):
+                self.app.write_skin_settings_vfs(SKIN_ID, values)
+
+        self.assertEqual(previous, path.read_bytes())
+
+    def test_finish_restages_once_when_kodi_did_not_load_valid_pending_settings(self):
+        values = [{"id": "family.setting", "type": "string", "value": "restored"}]
+        runtime.atomic_json(self.app.pending_path, {
+            "schema_version": 1,
+            "skin_id": SKIN_ID,
+            "phase": "rebuild",
+            "created_at": "2026-09-07T12:00:00Z",
+            "paths": [],
+            "skin_settings": values,
+            "helper_hashes": {},
+        })
+
+        with mock.patch.object(
+                self.app, "load_restored_skin_settings",
+                side_effect=[runtime.RestoredSettingsNotLoaded("not loaded"), None]) as load, \
+                mock.patch.object(self.app, "restage_and_reactivate") as restage, \
+                mock.patch.object(self.app, "verify_live_skin_settings"), \
+                mock.patch.object(self.app, "verify_restored_helpers"):
+            self.app.finish_restore()
+
+        self.assertEqual(2, load.call_count)
+        restage.assert_called_once()
+        self.assertFalse(Path(self.app.pending_path).exists())
+
+    def test_failed_restage_keeps_pending_transaction(self):
+        values = [{"id": "family.setting", "type": "string", "value": "restored"}]
+        runtime.atomic_json(self.app.pending_path, {
+            "schema_version": 1,
+            "skin_id": SKIN_ID,
+            "phase": "rebuild",
+            "created_at": "2026-09-07T12:00:00Z",
+            "paths": [],
+            "skin_settings": values,
+            "helper_hashes": {},
+        })
+
+        with mock.patch.object(self.app, "load_restored_skin_settings",
+                               side_effect=runtime.RestoredSettingsNotLoaded("not loaded")), \
+                mock.patch.object(self.app, "restage_and_reactivate",
+                                  side_effect=runtime.BackupError("VFS failed")):
+            with self.assertRaisesRegex(runtime.BackupError, "VFS failed"):
+                self.app.finish_restore()
+
+        self.assertTrue(Path(self.app.pending_path).exists())
+
+    def test_changed_document_is_not_automatically_restaged(self):
+        runtime.atomic_json(self.app.pending_path, {
+            "schema_version": 1,
+            "skin_id": SKIN_ID,
+            "phase": "rebuild",
+            "created_at": "2026-09-07T12:00:00Z",
+            "paths": [],
+            "skin_settings": [],
+            "helper_hashes": {},
+        })
+
+        with mock.patch.object(self.app, "load_restored_skin_settings",
+                               side_effect=runtime.BackupError("document changed")), \
+                mock.patch.object(self.app, "restage_and_reactivate") as restage:
+            with self.assertRaisesRegex(runtime.BackupError, "document changed"):
+                self.app.finish_restore()
+
+        restage.assert_not_called()
+        self.assertTrue(Path(self.app.pending_path).exists())
+
+    def test_addon_declares_executable_before_background_service(self):
+        import xml.etree.ElementTree as ET
+        extensions = ET.parse(ROOT / "addon.xml").getroot().findall("extension")
+        points = [item.get("point") for item in extensions]
+        self.assertLess(points.index("xbmc.python.script"), points.index("xbmc.service"))
+        script = next(item for item in extensions if item.get("point") == "xbmc.python.script")
+        self.assertEqual("executable", script.findtext("provides"))
+
     def test_operation_continues_when_progress_dialog_is_unavailable(self):
-        with mock.patch.object(runtime.xbmcgui, "DialogProgressBG", side_effect=RuntimeError("unsupported")):
+        with mock.patch.object(runtime.xbmcgui, "DialogProgress", side_effect=RuntimeError("unsupported")), \
+                mock.patch.object(runtime.xbmcgui, "DialogProgressBG", side_effect=RuntimeError("unsupported")):
             with self.app.working("Starting"):
                 completed = True
 
         self.assertTrue(completed)
+
+    def test_skin_switch_keeps_visible_cues_and_restores_modal_progress(self):
+        ENV.skin = "skin.estuary"
+
+        def change_skin(method, **params):
+            self.assertEqual("Settings.SetSettingValue", method)
+            ENV.skin = params["value"]
+            return True
+
+        with mock.patch.object(runtime, "rpc", side_effect=change_skin):
+            with self.app.working("Restoring"):
+                self.app.progress(35, "Before switch")
+                self.app.switch_skin(SKIN_ID)
+                self.assertIsNotNone(self.app._progress)
+                self.assertFalse(self.app._progress_background)
+
+        self.assertTrue(_Dialog.notifications)
+        self.assertIn("Accept Kodi", _Dialog.notifications[-1][1])
+        self.assertIn(("close",), _DialogProgressBG.instances[-1].events)
+        self.assertGreaterEqual(len(_DialogProgress.instances), 2)
         self.assertIsNone(self.app._progress)
 
     def tearDown(self):

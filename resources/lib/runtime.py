@@ -28,6 +28,10 @@ PERSISTENCE_VALUE = '1'
 SKIN_SETTING_ID = re.compile(r'^[A-Za-z0-9_.-]{1,256}$')
 
 
+class RestoredSettingsNotLoaded(BackupError):
+    """The verified document is intact, but Kodi activated a stale live map."""
+
+
 def rpc(method, **params):
     answer = json.loads(xbmc.executeJSONRPC(json.dumps(
         {'jsonrpc': '2.0', 'method': method, 'params': params, 'id': 1})))
@@ -213,6 +217,7 @@ class App:
         self.pending_path = os.path.join(self.data, 'pending-restore.json')
         self.monitor = xbmc.Monitor()
         self._progress = None
+        self._progress_background = False
         self._progress_percent = 0
         # Identity creation is separate from state updates and serialized even on first launch.
         with operation_lock(os.path.join(self.data, 'identity.lock')):
@@ -233,30 +238,77 @@ class App:
             self.progress(self._progress_percent, message)
             yield
             return
+        self._open_progress(message)
+        try:
+            yield
+        finally:
+            self._close_progress()
+
+    def _open_progress(self, message):
+        try:
+            dialog = xbmcgui.DialogProgress()
+            dialog.create(TITLE, message)
+            background = False
+        except Exception:
+            try:
+                dialog = xbmcgui.DialogProgressBG()
+                dialog.create(TITLE, message)
+                background = True
+            except Exception:
+                xbmc.log('{}: Progress dialog is unavailable.'.format(TITLE), xbmc.LOGWARNING)
+                return
+        self._progress = dialog
+        self._progress_background = background
+        self._progress_percent = 0
+
+    def _open_background_progress(self, message):
+        """Use a non-blocking indicator while Kodi owns the skin-confirmation dialog."""
         try:
             dialog = xbmcgui.DialogProgressBG()
             dialog.create(TITLE, message)
         except Exception:
             xbmc.log('{}: Background progress dialog is unavailable.'.format(TITLE), xbmc.LOGWARNING)
-            yield
             return
         self._progress = dialog
+        self._progress_background = True
         self._progress_percent = 0
-        try:
-            yield
-        finally:
+
+    def instruction(self, message):
+        """Show an instruction without stacking it over a modal progress dialog."""
+        resume = self._progress is not None
+        percent = self._progress_percent
+        if resume:
+            self._close_progress()
+        accepted = xbmcgui.Dialog().ok(TITLE, message)
+        if accepted is False:
+            raise BackupError('Restore paused before the next skin change. Choose Finish restored skin to continue.')
+        if resume:
+            self._open_progress('Continuing restore')
+            self.progress(percent, 'Continuing restore')
+
+    def _close_progress(self):
+        dialog, self._progress = self._progress, None
+        if dialog is not None:
             try:
                 dialog.close()
             except Exception:
                 pass
-            self._progress = None
-            self._progress_percent = 0
+        self._progress_background = False
+        self._progress_percent = 0
 
     def progress(self, percent, message):
         if self._progress is None:
             return
         self._progress_percent = max(0, min(100, int(percent)))
-        self._progress.update(self._progress_percent, TITLE, message)
+        try:
+            if self._progress_background:
+                self._progress.update(self._progress_percent, TITLE, message)
+            else:
+                self._progress.update(self._progress_percent, message)
+        except Exception:
+            # A skin switch can destroy its current progress window. Never let a
+            # presentation failure interrupt a backup or leave a restore staged.
+            self._close_progress()
 
     def pause(self, seconds):
         if self.monitor.waitForAbort(seconds):
@@ -375,6 +427,70 @@ class App:
         validate_skin_id(skin)
         return os.path.join(self.profile, 'addon_data', skin, 'settings.xml')
 
+    def skin_settings_vfs_path(self, skin):
+        return 'special://profile/addon_data/{}/settings.xml'.format(validate_skin_id(skin))
+
+    @staticmethod
+    def _read_vfs_bytes(path):
+        handle = xbmcvfs.File(path)
+        try:
+            return bytes(handle.readBytes(handle.size()))
+        finally:
+            handle.close()
+
+    @staticmethod
+    def _write_vfs_bytes(path, data):
+        handle = xbmcvfs.File(path, 'w')
+        try:
+            if handle.write(data) is False:
+                raise OSError('VFS write returned false')
+        finally:
+            handle.close()
+
+    def write_skin_settings_vfs(self, skin, values, document=None):
+        """Write and verify settings through Kodi's VFS so tvOS updates its native store."""
+        if xbmc.getSkinDir() == skin:
+            raise BackupError('The target skin must be inactive while its settings are staged.')
+        checked = checked_skin_setting_values(values)
+        data = skin_settings_document(checked) if document is None else bytes(document)
+        if not skin_settings_equal(
+                skin_setting_values({'addon_data/{}/settings.xml'.format(skin): data}, skin), checked):
+            raise BackupError('The staged settings document does not match its verified values.')
+        directory = 'special://profile/addon_data/{}'.format(skin)
+        if not xbmcvfs.mkdirs(directory) and not xbmcvfs.exists(directory):
+            raise BackupError('Kodi could not create the skin settings folder.')
+        path = self.skin_settings_vfs_path(skin)
+        previous = None
+        write_started = False
+        try:
+            if xbmcvfs.exists(path):
+                previous = self._read_vfs_bytes(path)
+            write_started = True
+            self._write_vfs_bytes(path, data)
+            saved = self._read_vfs_bytes(path)
+            actual = skin_setting_values(
+                {'addon_data/{}/settings.xml'.format(skin): saved}, skin)
+            if not skin_settings_equal(actual, checked):
+                raise BackupError('Kodi changed the restored skin settings while they were being staged.')
+        except BackupError:
+            try:
+                if write_started and previous is not None:
+                    self._write_vfs_bytes(path, previous)
+                elif write_started and xbmcvfs.exists(path):
+                    xbmcvfs.delete(path)
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            try:
+                if write_started and previous is not None:
+                    self._write_vfs_bytes(path, previous)
+                elif write_started and xbmcvfs.exists(path):
+                    xbmcvfs.delete(path)
+            except Exception:
+                pass
+            raise BackupError('Kodi could not stage and verify the restored skin settings through its file manager.') from exc
+
     def skin_settings_valid(self, skin):
         path = self.skin_settings_path(skin)
         try:
@@ -465,8 +581,8 @@ class App:
             except BackupError as exc:
                 last_error = exc
                 self.pause(0.25)
-        raise BackupError('Kodi did not load the complete restored settings document. '
-                          'Switch to another skin and reactivate this skin before retrying Finish restored skin.') from last_error
+        raise RestoredSettingsNotLoaded(
+            'Kodi did not load the complete restored settings document.') from last_error
 
     def verify_live_skin_settings(self, skin, values):
         live = rpc('Settings.GetSkinSettings')
@@ -565,25 +681,42 @@ class App:
     def switch_skin(self, skin):
         if xbmc.getSkinDir() == skin:
             return
-        xbmc.executebuiltin('ActivateWindow(home)')
-        self.progress(self._progress_percent, 'Switching to {}'.format(skin))
-        self.pause(0.5)
-        if not rpc('Settings.SetSettingValue', setting='lookandfeel.skin', value=skin):
-            raise BackupError('Kodi refused to change skins.')
-        # Kodi can load slowly, and its confirmation can still revert the choice for
-        # ten seconds. Require the requested skin to remain active past that window.
-        active_reads = 0
-        for _attempt in range(96):
-            self.pause(0.25)
-            if _attempt % 8 == 0:
-                self.progress(self._progress_percent, 'Waiting for Kodi to keep {}'.format(skin))
-            if xbmc.getSkinDir() == skin:
-                active_reads += 1
-                if active_reads >= 44:
-                    return
+        resume_progress = self._progress is not None
+        resume_percent = self._progress_percent
+        if resume_progress:
+            self._close_progress()
+        try:
+            xbmcgui.Dialog().notification(
+                TITLE, 'Activating {}. Accept Kodi\u2019s Keep this skin prompt.'.format(skin),
+                xbmcgui.NOTIFICATION_INFO, 12000)
+        except Exception:
+            pass
+        self._open_background_progress('Waiting for Kodi to activate {}'.format(skin))
+        try:
+            xbmc.executebuiltin('ActivateWindow(home)')
+            self.pause(0.5)
+            if not rpc('Settings.SetSettingValue', setting='lookandfeel.skin', value=skin):
+                raise BackupError('Kodi refused to change skins.')
+            # Kodi can load slowly, and its confirmation can still revert the choice for
+            # ten seconds. Require the requested skin to remain active past that window.
+            active_reads = 0
+            for _attempt in range(96):
+                self.pause(0.25)
+                if _attempt % 8 == 0:
+                    self.progress(self._progress_percent, 'Waiting for Kodi to keep {}'.format(skin))
+                if xbmc.getSkinDir() == skin:
+                    active_reads += 1
+                    if active_reads >= 44:
+                        break
+                else:
+                    active_reads = 0
             else:
-                active_reads = 0
-        raise BackupError('Skin change was not kept. Accept Kodi’s “Keep this skin” prompt and try again.')
+                raise BackupError('Skin change was not kept. Accept Kodi’s “Keep this skin” prompt and try again.')
+        finally:
+            self._close_progress()
+        if resume_progress:
+            self._open_progress('Continuing after activating {}'.format(skin))
+            self.progress(resume_percent, 'Continuing after activating {}'.format(skin))
 
     def restore_blob(self, blob):
         manifest, files = read_archive(blob)
@@ -619,7 +752,7 @@ class App:
                         xbmcaddon.Addon(fallback)
                     except RuntimeError as exc:
                         raise BackupError('Switch to a different installed skin, then run Restore again.') from exc
-                    xbmcgui.Dialog().ok(TITLE, 'Kodi will switch to {}. Accept “Keep this skin” so restoration can proceed.'.format(fallback))
+                    self.instruction('Kodi will switch to {}. Accept “Keep this skin” so restoration can proceed.'.format(fallback))
                     self.progress(15, 'Activating a safe skin before writing')
                     self.switch_skin(fallback)
                 if skin == xbmc.getSkinDir():
@@ -644,6 +777,9 @@ class App:
                     if not self.incomplete():
                         os.unlink(self.pending_path)
                     raise
+                self.progress(65, 'Staging settings through Kodi’s file manager')
+                self.write_skin_settings_vfs(
+                    skin, restored_settings, files['addon_data/{}/settings.xml'.format(skin)])
                 self.progress(75, 'Verifying staged restore files')
                 pending.update({'phase': 'rebuild', 'rollback': rollback})
                 journal = read_json(os.path.join(rollback, 'transaction.json'))
@@ -655,11 +791,14 @@ class App:
                 state['skins'] = {}
                 atomic_json(self.state_path, state)
                 self.progress(100, 'Restore files staged safely')
-        if xbmcgui.Dialog().yesno(TITLE, 'Restore files are staged, but activation and verification are still required. Activate {} now? Accept Kodi’s “Keep this skin” prompt.'.format(skin)):
-            with self.working('Activating the restored skin'):
-                self.progress(5, 'Activating {}'.format(skin))
-                self.switch_skin(skin)
-                self.finish_restore()
+        if xbmcgui.Dialog().ok(
+                TITLE, 'Restore files are staged. Kodi will now activate {}. Accept “Keep this skin” '
+                       'so verification can finish.'.format(skin)) is False:
+            return
+        with self.working('Activating the restored skin'):
+            self.progress(5, 'Activating {}'.format(skin))
+            self.switch_skin(skin)
+            self.finish_restore()
 
     def clear_helper_cache(self, skin, files):
         win = xbmcgui.Window(10000)
@@ -683,7 +822,11 @@ class App:
                 raise BackupError('Activate {} and accept the skin change, then choose Finish restored skin.'.format(skin))
             if 'skin_settings' in pending:
                 self.progress(25, 'Loading restored skin settings')
-                self.load_restored_skin_settings(skin, pending['skin_settings'])
+                try:
+                    self.load_restored_skin_settings(skin, pending['skin_settings'])
+                except RestoredSettingsNotLoaded:
+                    self.restage_and_reactivate(pending)
+                    self.load_restored_skin_settings(skin, pending['skin_settings'])
             self.progress(40, 'Refreshing restored helper data')
             self.clear_helper_cache(skin, pending.get('paths', []))
             for setting in APPEARANCE:
@@ -710,6 +853,30 @@ class App:
                        else 'Restore complete: {} skin settings; {} helper files.'.format(
                            len(pending.get('skin_settings', [])), len(pending.get('helper_hashes', {}))))
             xbmcgui.Dialog().notification(TITLE, message, xbmcgui.NOTIFICATION_INFO)
+
+    def restage_and_reactivate(self, pending):
+        """Recover a valid transaction that tvOS did not load into the skin cache."""
+        skin = pending['skin_id']
+        fallback = 'skin.estuary' if skin != 'skin.estuary' else 'skin.estouchy'
+        try:
+            xbmcaddon.Addon(fallback)
+        except RuntimeError as exc:
+            raise BackupError('Install or activate a different skin before retrying this restore.') from exc
+        self.instruction(
+            'Kodi did not load every staged setting. It will safely switch to {}, restage the same '
+            'verified settings through Kodi’s file manager, and reactivate {}. Accept each '
+            '“Keep this skin” prompt.'.format(fallback, skin))
+        self.progress(28, 'Activating a safe skin for recovery')
+        self.switch_skin(fallback)
+        if xbmc.getSkinDir() == skin:
+            raise BackupError('The target skin remained active; no settings were written.')
+        self.progress(32, 'Restaging the verified settings through Kodi')
+        self.write_skin_settings_vfs(skin, pending['skin_settings'])
+        self.instruction(
+            'The verified settings are staged. Kodi will now reactivate {}. Accept '
+            '“Keep this skin” to continue.'.format(skin))
+        self.progress(36, 'Reactivating the restored skin')
+        self.switch_skin(skin)
 
     def verify_restored_helpers(self, pending):
         """Do not report success if AF3 or its helper replaced restored source data."""
@@ -812,6 +979,14 @@ class App:
                 self.progress(75, 'Verifying recovered files')
             if pending and pending.get('phase') == 'restoring':
                 if recovered:
+                    with self.working('Finalizing recovered settings'):
+                        self.progress(85, 'Restaging the recovered previous settings through Kodi')
+                        files = collect_files(self.profile, pending['skin_id'])
+                        settings = skin_setting_values(files, pending['skin_id'])
+                        document = files.get(
+                            'addon_data/{}/settings.xml'.format(pending['skin_id']),
+                            skin_settings_document(settings))
+                        self.write_skin_settings_vfs(pending['skin_id'], settings, document)
                     os.unlink(self.pending_path)
                     xbmcgui.Dialog().ok(TITLE, 'Recovered {} interrupted transaction(s). Previous files are back in place.'.format(len(recovered)))
                     return
@@ -829,6 +1004,11 @@ class App:
                                 completed.append((path, journal))
                 if completed:
                     path, journal = max(completed, key=lambda item: os.path.getmtime(item[0]))
+                    if 'skin_settings' in pending:
+                        with self.working('Finalizing restored settings'):
+                            self.progress(85, 'Staging settings through Kodi’s file manager')
+                            self.write_skin_settings_vfs(
+                                pending['skin_id'], pending['skin_settings'])
                     pending.update({'phase': 'rebuild', 'rollback': os.path.dirname(path),
                                     'paths': sorted(set(pending.get('paths', [])) | {e['path'] for e in journal['previous_entries']})})
                     atomic_json(self.pending_path, pending)
@@ -855,6 +1035,10 @@ class App:
                 self.progress(55, 'Reading the restored previous settings')
                 files = collect_files(self.profile, skin)
                 settings = skin_setting_values(files, skin)
+                self.progress(65, 'Restaging previous settings through Kodi')
+                settings_document = files.get(
+                    'addon_data/{}/settings.xml'.format(skin), skin_settings_document(settings))
+                self.write_skin_settings_vfs(skin, settings, settings_document)
                 helper_hashes = {path: hashlib.sha256(data).hexdigest() for path, data in files.items()
                                  if path != 'addon_data/{}/settings.xml'.format(skin)}
                 self.progress(75, 'Saving the rollback completion state')
@@ -954,7 +1138,7 @@ def run_ui(args=None):
         actions = [('backup', 'Back up now'), ('protect', 'Save protected snapshot'),
                    ('restore', 'Restore backup'), ('import', 'Import backup ZIP'),
                    ('destination', 'Choose destination'), ('settings', 'Settings'),
-                   ('status', 'Status and coverage')]
+                   ('status', 'Instructions / Readme')]
         try:
             pending = app.pending()
         except BackupError:
