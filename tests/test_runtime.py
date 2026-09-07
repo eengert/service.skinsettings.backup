@@ -51,6 +51,23 @@ class _Dialog:
         return None
 
 
+class _DialogProgressBG:
+    instances = []
+
+    def __init__(self):
+        self.events = []
+        self.__class__.instances.append(self)
+
+    def create(self, heading, message=""):
+        self.events.append(("create", heading, message))
+
+    def update(self, percent, heading="", message=""):
+        self.events.append(("update", percent, heading, message))
+
+    def close(self):
+        self.events.append(("close",))
+
+
 class _Window:
     properties = {}
 
@@ -141,6 +158,7 @@ xbmcgui = types.ModuleType("xbmcgui")
 xbmcgui.NOTIFICATION_INFO = "info"
 xbmcgui.NOTIFICATION_WARNING = "warning"
 xbmcgui.Dialog = _Dialog
+xbmcgui.DialogProgressBG = _DialogProgressBG
 xbmcgui.Window = _Window
 
 xbmcaddon = types.ModuleType("xbmcaddon")
@@ -210,9 +228,32 @@ class RuntimeTests(unittest.TestCase):
         }
         ENV.fail_record_write = False
         _Window.properties = {}
+        _DialogProgressBG.instances = []
         ENV.profile.mkdir()
         self.write_settings(3, "initial")
         self.app = runtime.App()
+
+    def test_progress_dialog_closes_when_operation_fails(self):
+        with self.assertRaisesRegex(runtime.BackupError, "deliberate failure"):
+            with self.app.working("Starting"):
+                self.app.progress(40, "Working")
+                raise runtime.BackupError("deliberate failure")
+
+        self.assertEqual(
+            [("create", runtime.TITLE, "Starting"),
+             ("update", 40, runtime.TITLE, "Working"),
+             ("close",)],
+            _DialogProgressBG.instances[-1].events,
+        )
+        self.assertIsNone(self.app._progress)
+
+    def test_operation_continues_when_progress_dialog_is_unavailable(self):
+        with mock.patch.object(runtime.xbmcgui, "DialogProgressBG", side_effect=RuntimeError("unsupported")):
+            with self.app.working("Starting"):
+                completed = True
+
+        self.assertTrue(completed)
+        self.assertIsNone(self.app._progress)
 
     def tearDown(self):
         self.temporary.cleanup()
