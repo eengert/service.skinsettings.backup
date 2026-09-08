@@ -112,3 +112,9 @@ Modal progress cancellation is honored while preserving completed backups and pe
 All 82 automated tests pass, including Skin Variables build-hash changes, simulated crashes during rollback snapshot creation, already-completed automatic rollback recovery, malformed pending-state escape, symlink rejection, cancellation, delayed skin confirmation, skin reversion, and clean/pending menu states. Python compilation and Git whitespace checks pass.
 
 Native validation used the exact 1.0.15 ZIP on Kodi 21.1 with Python 3.11.7. The system check passed 11 of 11 checks; manual backup saved 276 user skin settings and eight managed files; restore staged through Estuary with visible progress, retained a pending transaction across rejected skin confirmations, rebuilt AF3 with visible progress, verified all restored settings and seven helper files, and cleared the pending marker. The test discovered and fixed four Skin Variables build fingerprints that must change during regeneration and are now excluded from user-setting backup and verification.
+
+## Version 1.0.16 — streamlined menu, expanded help and new icon
+
+The main menu now uses **Backup current skin**, **Settings**, and **Help and Status**. The duplicate **Choose backup folder** command and its unused runtime branch were removed; Kodi's native folder picker remains available through **Settings → Backup folder**. The Help and Status screen explains each primary backup, restore, import, and system-check action. The optional device-name setting now explains that its value identifies the source device in backup details without changing storage or Kodi identity.
+
+The add-on thumbnail now uses a high-contrast painter's palette, brush, and circular backup arrow designed to remain recognizable in Kodi's compact add-on views. All 83 automated tests pass, together with Python compilation and Git whitespace checks.

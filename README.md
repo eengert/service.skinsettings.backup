@@ -4,9 +4,9 @@ A small Kodi program and background service for versioned skin-setting backups. 
 
 ## Install and use
 
-1. In Kodi, enable installation from unknown sources if needed, then **Add-ons → Install from zip file**, selecting `service.skinsettings.backup-1.0.15.zip`.
-2. Open **Program add-ons → Skin Settings Backup → Backup settings → Backup folder**. Select a writable folder in Kodi’s folder picker, preferably on a Mac or NAS. Network sources added in Kodi’s File Manager are available in the picker. The add-on menu’s **Choose backup folder** action also opens a folder picker. Configure share authentication through Kodi's network sources instead of embedding passwords in the path.
-3. Select **Back up current skin** to create and verify your initial protected snapshot. Select **Create protected backup** before a skin update or after a major customization.
+1. In Kodi, enable installation from unknown sources if needed, then **Add-ons → Install from zip file**, selecting `service.skinsettings.backup-1.0.16.zip`.
+2. Open **Program add-ons → Skin Settings Backup → Settings → Backup folder**. Select a writable folder in Kodi’s folder picker, preferably on a Mac or NAS. Network sources added in Kodi’s File Manager are available in the picker. Configure share authentication through Kodi's network sources instead of embedding passwords in the path.
+3. Select **Backup current skin** to create and verify your initial protected snapshot. Select **Create protected backup** before a skin update or after a major customization.
 4. In Settings, select an interval (1, 6, 12, 24 or 168 hours) and how many automatic backups to keep (default 14). Scheduling is enabled once a destination is set. The first snapshot and explicitly protected snapshots never expire.
 
 The service waits 45 seconds after startup and works only while Kodi is idle and no media is playing. It catches up after a missed interval when Kodi runs again. It cannot wake a suspended Apple TV or run while Kodi is closed. Unchanged settings do not create additional automatic archives. Failed operations retry after five minutes; repeated identical failures notify at most once a day. Manual backups may run while Kodi is playing; restores require stopped playback.

@@ -856,9 +856,10 @@ class RuntimeTests(unittest.TestCase):
             runtime.run_ui()
 
         labels = dialog.select.call_args.args[1]
-        self.assertEqual("Back up current skin", labels[0])
-        self.assertIn("Choose backup folder", labels)
-        self.assertIn("Help and backup status", labels)
+        self.assertEqual("Backup current skin", labels[0])
+        self.assertNotIn("Choose backup folder", labels)
+        self.assertIn("Settings", labels)
+        self.assertIn("Help and Status", labels)
 
     def test_pending_menu_prioritizes_resolution_and_hides_new_operations(self):
         runtime.atomic_json(self.app.pending_path, {
@@ -877,8 +878,20 @@ class RuntimeTests(unittest.TestCase):
         labels = dialog.select.call_args.args[1]
         self.assertEqual("Complete pending restore", labels[0])
         self.assertIn("Keep current files and clear restore status", labels)
-        self.assertNotIn("Back up current skin", labels)
+        self.assertNotIn("Backup current skin", labels)
         self.assertNotIn("Restore a saved backup", labels)
+
+    def test_help_describes_each_primary_menu_action(self):
+        dialog = mock.Mock()
+        with mock.patch.object(runtime.xbmcgui, "Dialog", return_value=dialog):
+            self.app.status()
+
+        help_text = dialog.textviewer.call_args.args[1]
+        for label in ("Backup current skin", "Create protected backup",
+                      "Restore a saved backup", "Import backup ZIP", "Run system check"):
+            self.assertIn("[B]{}[/B]".format(label), help_text)
+        self.assertIn("temporary test data", help_text)
+        self.assertIn("does not restore or change", help_text)
 
     def test_malformed_pending_menu_remains_clearable(self):
         Path(self.app.pending_path).write_text("{not-json")

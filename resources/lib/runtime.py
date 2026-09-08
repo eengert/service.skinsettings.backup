@@ -1223,7 +1223,24 @@ class App:
     def status(self):
         state = self.state()
         entries = [value.get('last_backup', 'None') for value in state['skins'].values()]
-        text = 'Last successful backup: {}\nDevice ID: {}\nPending restore: {}\n\n'.format(
+        text = ('MENU OPTIONS\n\n'
+                '[B]Backup current skin[/B]\n'
+                'Creates and verifies a backup of the active skin settings and supported helper files. '
+                'The first backup is protected automatically.\n\n'
+                '[B]Create protected backup[/B]\n'
+                'Creates a backup that automatic retention will never remove. Use this before a skin update '
+                'or a major customization.\n\n'
+                '[B]Restore a saved backup[/B]\n'
+                'Selects a completed backup saved for this Kodi device and profile, verifies it, and restores '
+                'its skin settings and supported helper files.\n\n'
+                '[B]Import backup ZIP[/B]\n'
+                'Selects and verifies a backup ZIP, including one copied from another Kodi device, then starts '
+                'the same protected restore process.\n\n'
+                '[B]Run system check[/B]\n'
+                'Checks the backup folder, Kodi file access, archive integrity, and recovery using temporary '
+                'test data. It only reads the current skin and does not restore or change its settings.\n\n'
+                'STATUS\n\n')
+        text += 'Last successful backup: {}\nDevice ID: {}\nPending restore: {}\n\n'.format(
             max(entries) if entries else 'None', state['device_id'], os.path.exists(self.pending_path))
         blocked = [value['blocked'] for value in state['skins'].values() if value.get('blocked')]
         if blocked:
@@ -1267,23 +1284,22 @@ def run_ui(args=None):
         incomplete = False if pending_error and os.path.exists(app.pending_path) else app.incomplete()
         if pending_error and os.path.exists(app.pending_path):
             actions = [('abandon', 'Clear unreadable restore status (keep current files)'),
-                       ('settings', 'Backup settings'), ('status', 'Help and backup status')]
+                       ('settings', 'Settings'), ('status', 'Help and Status')]
         elif pending and pending.get('phase') in ('rebuild', 'rollback_rebuild') and not incomplete:
             actions = [('finish', 'Complete undo and verify previous settings'
                         if pending.get('phase') == 'rollback_rebuild' else 'Complete pending restore')]
             if pending.get('phase') == 'rebuild':
                 actions.append(('cancel', 'Undo pending restore (restore previous files)'))
             actions.extend([('abandon', 'Keep current files and clear restore status'),
-                            ('settings', 'Backup settings'), ('status', 'Help and backup status')])
+                            ('settings', 'Settings'), ('status', 'Help and Status')])
         elif (pending and pending.get('phase') == 'restoring') or incomplete:
             actions = [('recover', 'Repair interrupted file operation'),
                        ('abandon', 'Keep current files and clear restore status'),
-                       ('settings', 'Backup settings'), ('status', 'Help and backup status')]
+                       ('settings', 'Settings'), ('status', 'Help and Status')]
         else:
-            actions = [('backup', 'Back up current skin'), ('protect', 'Create protected backup'),
+            actions = [('backup', 'Backup current skin'), ('protect', 'Create protected backup'),
                        ('restore', 'Restore a saved backup'), ('import', 'Import backup ZIP'),
-                       ('destination', 'Choose backup folder'), ('settings', 'Backup settings'),
-                       ('status', 'Help and backup status')]
+                       ('settings', 'Settings'), ('status', 'Help and Status')]
         actions.append(('selftest', 'Run system check'))
         selected = xbmcgui.Dialog().select(TITLE, [label for _action, label in actions])
         if selected < 0:
@@ -1301,10 +1317,6 @@ def run_ui(args=None):
                 with app.working('Reading and verifying the backup ZIP'):
                     blob = Store(xbmcvfs, '', os.path.join(app.data, 'staging')).read(path)
                 app.restore_blob(blob)
-        elif action == 'destination':
-            path = xbmcgui.Dialog().browseSingle(0, 'Choose backup folder', 'files', treatAsFolder=True)
-            if path:
-                app.addon.setSetting('destination', path)
         elif action == 'settings':
             app.addon.openSettings()
         elif action == 'status':

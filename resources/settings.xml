@@ -8,7 +8,7 @@
           <constraints><sources><source>files</source></sources><writable>true</writable><allowempty>true</allowempty></constraints>
           <control type="button" format="path"><heading>32001</heading></control>
         </setting>
-        <setting id="device_name" type="string" label="32002">
+        <setting id="device_name" type="string" label="32002" help="32014">
           <level>0</level><default/><constraints><allowempty>true</allowempty></constraints>
           <control type="edit" format="string"><heading>32002</heading></control>
         </setting>
